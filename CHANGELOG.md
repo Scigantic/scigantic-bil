@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- JPEG 2000 (`.jp2`, `.j2k`, `.jpx`) reads in place: `read_jp2()` decodes
+  exactly through imagecodecs' bundled OpenJPEG (a 12 MB STPT section to
+  (11377, 8557) uint16 in 1.5 s; Dong-lab tracing sections to
+  (12000, 16000, 3) uint16), with `reduce=k` for a 1/2**k decode through
+  Pillow on the 75 to 550 MB RGB sections. `read_image()` dispatches by
+  extension; `slices()`, `read_stack()`, `first_images()`, `find()`,
+  `thumbnail()` and `preview_plane()` accept JPEG 2000 alongside TIFF.
+  This covers 5,787 datasets that previously raised UnsupportedFormatError.
+- Checked and documented: BIL's codestreams do not decode truncated, so
+  the whole file is fetched; Pillow's reduced decode rejects 16-bit
+  single-channel files, which fall back to a full decode.
+
 ## 0.2.0
 
 Everything here came out of running the package against the whole archive

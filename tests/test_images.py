@@ -62,8 +62,6 @@ def test_downsample_stride() -> None:
 
 
 def test_unsupported_formats_name_the_alternative() -> None:
-    with pytest.raises(bil.UnsupportedFormatError, match="glymur"):
-        bil.read_tiff("https://download.brainimagelibrary.org/x/y/z/section.jp2")
     with pytest.raises(bil.UnsupportedFormatError, match="h5py"):
         bil.read_tiff("https://download.brainimagelibrary.org/x/y/z/volume.ims")
     with pytest.raises(bil.UnsupportedFormatError):
@@ -166,7 +164,33 @@ def test_terafly_levels_and_thumbnail() -> None:
 
 
 def test_thumbnail_error_names_the_right_tool() -> None:
-    with pytest.raises(bil.UnsupportedFormatError, match="glymur"):
-        bil.thumbnail("ace-bit-wig")  # STPT, .jp2 only
     with pytest.raises(bil.UnsupportedFormatError, match="navis"):
         bil.thumbnail("ace-nap-out")  # .swc only
+
+
+def test_read_jp2_stpt_section_exact() -> None:
+    entries = bil.slices("ace-bit-wig")  # STPT, 267 x ~12 MB JPEG 2000 sections
+    assert entries and entries[0].extension == ".jp2"
+    a = bil.read_jp2(entries[len(entries) // 2])
+    assert a.shape == (11377, 8557) and a.dtype == np.uint16 and a.max() > 1000
+    b = bil.read_image(entries[len(entries) // 2])
+    assert b.shape == a.shape
+    with pytest.raises(bil.UnsupportedFormatError, match="read_jp2"):
+        bil.read_tiff(entries[0])
+
+
+def test_read_jp2_reduced_resolution_rgb_section() -> None:
+    entries = bil.first_images("ace-bed-rag")  # Dong-lab tracing, 75 MB RGB sections
+    entry = entries[len(entries) // 2]
+    a = bil.read_jp2(entry, reduce=3)
+    assert a.ndim == 3 and a.shape[-1] == 3 and a.shape[0] == 12000 // 8 and a.shape[1] == 16000 // 8
+
+
+def test_jp2_thumbnails_across_producers() -> None:
+    import time
+
+    for bildid, ndim in (("ace-bit-wig", 2), ("ace-zip-hen", 3)):
+        t0 = time.time()
+        th = bil.thumbnail(bildid, max_size=256)
+        assert th.ndim == ndim and max(th.shape[:2]) <= 256 and th.max() > 0
+        assert time.time() - t0 < 120

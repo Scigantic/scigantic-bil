@@ -44,6 +44,8 @@ _WHOLE_FILE_LIMIT = 64 << 20
 _BLOCK = 256 << 10
 
 _TIFF_SUFFIXES = (".tif", ".tiff", ".ome.tif", ".ome.tiff")
+_JP2_SUFFIXES = (".jp2", ".j2k", ".jpx")
+_IMAGE_SUFFIXES = _TIFF_SUFFIXES + _JP2_SUFFIXES
 
 
 class UnsupportedFormatError(BilError):
@@ -184,11 +186,8 @@ def read_tiff(target: FileEntry | str, key: int | Sequence[int] | None = None) -
 
     url, size = _entry_of(target)
     lower = url.lower()
-    if lower.endswith(".jp2"):
-        raise UnsupportedFormatError(
-            f"{url} is JPEG 2000; scigantic-bil does not decode .jp2 yet. "
-            "Use files.download() then glymur (pip install glymur, needs OpenJPEG)."
-        )
+    if lower.endswith(_JP2_SUFFIXES):
+        raise UnsupportedFormatError(f"{url} is JPEG 2000: use read_jp2() or read_image()")
     if lower.endswith(".ims"):
         raise UnsupportedFormatError(f"{url} is an Imaris HDF5 file; download it and open with h5py.")
     if not lower.endswith(_TIFF_SUFFIXES):
@@ -215,6 +214,51 @@ def read_tiff(target: FileEntry | str, key: int | Sequence[int] | None = None) -
     except _DECODE_ERRORS as exc:
         fh.seek(0)
         return _decode_with_pillow(cast("IO[bytes]", fh), key=key, url=url, cause=exc)
+
+
+def read_jp2(target: FileEntry | str, reduce: int = 0) -> np.ndarray:
+    """One JPEG 2000 file (``.jp2``/``.j2k``) as a numpy array, decoded with
+    imagecodecs' bundled OpenJPEG: exact dtype and every channel, so a
+    16-bit STPT section comes back uint16 (11377 x 8557 in 1.5 s from a
+    12 MB file) and a Dong-lab tracing section as (12000, 16000, 3)
+    uint16. ``reduce=k`` decodes at 1/2**k resolution through Pillow
+    instead, which is 4 to 15x faster on the 75 to 550 MB RGB sections
+    but returns 8-bit and does not support 16-bit single-channel files;
+    on those it falls back to a full decode plus stride. The whole file
+    is always fetched: BIL's codestreams do not decode truncated (checked
+    2026-09-08 at 3, 10 and 30 percent of the bytes)."""
+    import imagecodecs
+
+    url, size = _entry_of(target)
+    if not url.lower().endswith(_JP2_SUFFIXES):
+        raise UnsupportedFormatError(f"{url} is not JPEG 2000")
+    resp = send("GET", url, timeout=900.0)
+    data = resp.content
+    resp.close()
+    if reduce > 0:
+        try:
+            from PIL import Image
+
+            Image.MAX_IMAGE_PIXELS = None
+            im: Any = Image.open(io.BytesIO(data))
+            # Jpeg2KImageFile.reduce is the decode-time resolution reduction
+            # (an attribute set before load), not Image.reduce() the method.
+            setattr(im, "reduce", reduce)
+            im.load()
+            return np.asarray(im)
+        except Exception:
+            arr = np.asarray(imagecodecs.jpeg2k_decode(data))
+            step = 2**reduce
+            return arr[::step, ::step]
+    return np.asarray(imagecodecs.jpeg2k_decode(data))
+
+
+def read_image(target: FileEntry | str, **kwargs: Any) -> np.ndarray:
+    """read_tiff() or read_jp2() by file extension."""
+    url, _ = _entry_of(target)
+    if url.lower().endswith(_JP2_SUFFIXES):
+        return read_jp2(target, **kwargs)
+    return read_tiff(target, **kwargs)
 
 
 # tifffile raises its codec's own error class on a bad strip; imagecodecs'
@@ -255,11 +299,27 @@ def preview_plane(target: FileEntry | str, max_size: int = 512, page: int | None
     - tiled: a centre region of 2 x max_size pixels a side, exact pixels,
       because a uniform decimation of a tiled page touches every tile
     - anything under 64 MB: read whole, then stride-downsampled
+    - JPEG 2000: full decode for small sections, Pillow reduced-resolution
+      decode (1/4 or 1/8) for large ones; see read_jp2()
 
-    read_tiff() remains the exact reader; this is for looking."""
+    read_tiff()/read_jp2() remain the exact readers; this is for looking."""
     import tifffile
 
     url, size = _entry_of(target)
+    if url.lower().endswith(_JP2_SUFFIXES):
+        if size is None:
+            head = send("HEAD", url, timeout=60.0)
+            length = head.headers.get("Content-Length")
+            head.close()
+            size = int(length) if length else None
+        # Small sections (STPT, ~12 MB) decode fully in a second or two.
+        # Big RGB sections (75 to 550 MB) decode at reduced resolution;
+        # a guess of reduce from the byte size keeps the decode under a
+        # few seconds, the fetch itself is the cost there.
+        if size is not None and size > _WHOLE_FILE_LIMIT:
+            reduce = 2 if size < 200 << 20 else 3
+            return downsample(_squeeze_2d(read_jp2(target, reduce=reduce)), max_size)
+        return downsample(_squeeze_2d(read_jp2(target)), max_size)
     tif, fh = _open_tiff(url, size)
     with tif:
         n_pages = len(tif.pages)
@@ -436,10 +496,10 @@ def read_region(
 
 
 def slices(target: str | Dataset | DatasetDetail, channel: str | None = None) -> list[FileEntry]:
-    """The TIFF files of a dataset in natural z order; the raw material of
-    a stack. ``channel`` keeps only names containing that substring
-    (``"ch02"``) when a directory interleaves channels."""
-    entries = find(target, suffix=_TIFF_SUFFIXES, recursive=True)
+    """The TIFF and JPEG 2000 files of a dataset in natural z order; the
+    raw material of a stack. ``channel`` keeps only names containing that
+    substring (``"ch02"``) when a directory interleaves channels."""
+    entries = find(target, suffix=_IMAGE_SUFFIXES, recursive=True)
     if channel:
         entries = [e for e in entries if channel.lower() in e.name.lower()]
     return entries
@@ -457,8 +517,8 @@ def read_stack(
     range small: a full 2,000-slice stack is ~30 GB."""
     entries = slices(target, channel=channel)[start:stop:step]
     if not entries:
-        raise BilError(f"no TIFF slices found under {resolve_url(target)}")
-    planes = [read_tiff(e) for e in entries]
+        raise BilError(f"no TIFF or JPEG 2000 slices found under {resolve_url(target)}")
+    planes = [_squeeze_2d(read_image(e)) for e in entries]
     return np.stack(planes, axis=0)
 
 
@@ -482,8 +542,8 @@ def thumbnail(
     """A small 2-D preview of a dataset, reading as little as possible and
     never crawling a whole tree. In order: a FileEntry is read directly;
     a TeraFly (fMOST) tree's coarsest resolution folder, stitched; an
-    OME-Zarr store's coarsest level; else the first folder of TIFF slices
-    found by a bounded descent, middle slice. ``index`` picks a slice; ``channel``
+    OME-Zarr store's coarsest level; else the first folder of TIFF or
+    JPEG 2000 slices found by a bounded descent, middle slice. ``index`` picks a slice; ``channel``
     keeps only file names containing it (``"ch02"``)."""
     if isinstance(target, FileEntry):
         return preview_plane(target, max_size=max_size, page=index)
@@ -495,7 +555,7 @@ def thumbnail(
     stores = find_zarr(target)
     if stores:
         return zarr_thumbnail(stores[0], max_size=max_size, index=index)
-    stack = first_images(target, suffix=_TIFF_SUFFIXES)
+    stack = first_images(target, suffix=_IMAGE_SUFFIXES)
     if channel:
         stack = [e for e in stack if channel.lower() in e.name.lower()]
     if stack:
@@ -505,14 +565,13 @@ def thumbnail(
         return preview_plane(stack[i], max_size=max_size)
     exts = extensions_under(target)
     raise UnsupportedFormatError(
-        f"no TIFF slices, zarr store or TeraFly tree under {resolve_url(target)}; found extensions {exts}. "
-        + _format_hint(exts)
+        f"no TIFF or JPEG 2000 slices, zarr store or TeraFly tree under {resolve_url(target)}; "
+        f"found extensions {exts}. " + _format_hint(exts)
     )
 
 
 def _format_hint(exts: list[str]) -> str:
     hints = {
-        ".jp2": "JPEG 2000 sections: download one with bil.download() and open it with glymur (needs OpenJPEG).",
         ".swc": "SWC neuron reconstructions: navis.read_swc(url) reads them directly.",
         ".nii": "NIfTI volumes: nibabel.load() after bil.download().",
         ".nii.gz": "NIfTI volumes: nibabel.load() after bil.download().",
