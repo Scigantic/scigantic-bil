@@ -136,7 +136,7 @@ g["6"][0, 0, 400]                        # one plane of the coarsest level, a fe
 bil.zarr_thumbnail(g, max_size=512)
 ```
 
-A zarr store is a directory, so it never shows in the inventory's extension histogram; `find_zarr()` is how to know a dataset ships one. Requires `pip install "scigantic-bil[zarr]"` (zarr 3, fsspec, aiohttp).
+A zarr store is a directory, so it never shows in the inventory's extension histogram; `find_zarr()` is how to know a dataset ships one. Requires `pip install "scigantic-bil[zarr]"` (zarr 3, fsspec, aiohttp) and Python 3.11 or newer, which is zarr 3's own floor; on 3.10 the extra installs nothing and `open_zarr()` raises a clear ImportError.
 
 ## Caching
 

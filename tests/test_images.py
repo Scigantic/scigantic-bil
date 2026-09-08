@@ -70,6 +70,7 @@ def test_unsupported_formats_name_the_alternative() -> None:
 
 
 def test_open_zarr_and_levels() -> None:
+    pytest.importorskip("zarr")
     g = bil.open_zarr(ZARR_STORE)
     levels = bil.zarr_levels(g)
     # .zattrs declares 8 levels, the server has 7: levels must reflect the server.
@@ -78,6 +79,7 @@ def test_open_zarr_and_levels() -> None:
 
 
 def test_zarr_thumbnail_reads_coarsest_level() -> None:
+    pytest.importorskip("zarr")
     th = bil.zarr_thumbnail(bil.open_zarr(ZARR_STORE), max_size=256)
     assert th.ndim == 2 and max(th.shape) <= 256 and th.max() > 0
     # thumbnail() on the dataset id should pick the store, not crawl chunks
@@ -90,3 +92,18 @@ def test_dataset_without_images_raises_clearly() -> None:
     # handled above; here, an empty-ish inventory directory.
     with pytest.raises((bil.UnsupportedFormatError, bil.BilNotFoundError)):
         bil.thumbnail("https://download.brainimagelibrary.org/inventory/datasets/parquet/")
+
+
+def test_open_zarr_without_zarr_installed_is_a_clear_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_zarr(name: str, *a: object, **k: object) -> object:
+        if name == "zarr" or name.startswith("zarr."):
+            raise ImportError("simulated missing zarr")
+        return real_import(name, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(builtins, "__import__", no_zarr)
+    with pytest.raises(ImportError, match="scigantic-bil\\[zarr\\]"):
+        bil.open_zarr(ZARR_STORE)
