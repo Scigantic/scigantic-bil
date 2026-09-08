@@ -84,3 +84,70 @@ def test_manifest_rejects_non_id() -> None:
         bil.manifest("https://download.brainimagelibrary.org/x/")
     with pytest.raises(bil.BilNotFoundError):
         bil.manifest("zzz-zzz-zzz")
+
+
+def test_paths_with_hash_space_and_unicode_are_encoded() -> None:
+    # 39 inventory rows carry '#', spaces or non-ASCII; an unencoded '#' is
+    # a URL fragment and 404'd. The server lists the directory as %236.
+    url = bil.dataset_url("/bil/data/ca/27/ca273783c1dba805/2019Q1_U01Zhang/Virus_tracing-B1-#6/")
+    assert url.endswith("/Virus_tracing-B1-%236/")
+    assert bil.encode_url(url) == url  # idempotent
+    assert bil.encode_path("S100β_staining") == "S100%CE%B2_staining"
+    entries = bil.list_files("ace-act-cow")
+    assert len(entries) == 44744
+    assert entries[0].name.startswith("SC_SLICE") and "%23" in entries[0].url
+
+
+def test_listing_names_are_decoded_urls_stay_encoded() -> None:
+    from scigantic_bil.files import _parse_listing
+
+    html = '<a href="Virus_tracing-B1-%236/">Virus_tracing-B1-%236/</a>  15-Dec-2021 01:58  -\n'
+    rows = _parse_listing(html, "https://x/y/")
+    assert rows[0]["name"] == "Virus_tracing-B1-#6" and rows[0]["url"] == "https://x/y/Virus_tracing-B1-%236/"
+
+
+def test_two_word_and_one_word_ids_are_accepted() -> None:
+    # 748 two-word and 113 one-word ids in the 2026-07-31 inventory.
+    from scigantic_bil.files import _bildid_of
+
+    assert _bildid_of("act-nod") == "act-nod"
+    assert _bildid_of("ace") == "ace"
+    assert _bildid_of("ace-cup-eel") == "ace-cup-eel"
+    assert _bildid_of("https://x/") is None
+    assert bil.manifest("act-nod")
+
+
+def test_manifest_size_guard() -> None:
+    size = bil.manifest_size("ace-owl-cot")  # 4.7 M files
+    assert size is not None and size > 500_000_000
+    with pytest.raises(bil.ManifestTooLargeError, match="pass max_bytes=None"):
+        bil.manifest("ace-owl-cot")
+    # An already-cached manifest is returned regardless of max_bytes (no
+    # download cost), so the limit is exercised on an id no other test loads.
+    with pytest.raises(bil.ManifestTooLargeError):
+        bil.manifest("ace-cab-leg", max_bytes=1000)
+    assert bil.manifest_size("zzz-zzz-zzz") is None
+
+
+def test_find_zarr_is_bounded_on_huge_trees() -> None:
+    import time
+
+    t0 = time.time()
+    assert bil.find_zarr("ace-cap-cop") == []  # 1.6 M-file TeraFly tree, manifest too large
+    assert time.time() - t0 < 60
+
+
+def test_first_images_bounded_descent() -> None:
+    hits = bil.first_images("ace-owl-cot")  # 4.7 M files, one request per level
+    assert hits and all(h.name.lower().endswith((".tif", ".tiff")) for h in hits)
+    assert bil.first_images("ace-nap-out") == []  # SWC-only dataset
+
+
+def test_landing_zone_paths_are_refused_clearly() -> None:
+    with pytest.raises(bil.BilNotFoundError, match="landing zone"):
+        bil.resolve_url("/bil/lz/bakerk/360338984d84469c/702265")
+
+
+def test_stale_inventory_path_error_names_parent() -> None:
+    with pytest.raises(bil.BilNotFoundError, match="list the parent"):
+        bil.list_files("ace-oat-let")  # inventory says 'ventral midbrain', server has 'ventral_midbrain'

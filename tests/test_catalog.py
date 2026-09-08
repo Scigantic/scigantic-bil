@@ -88,3 +88,17 @@ def test_from_tsv_tolerates_blank_and_na_cells() -> None:
     assert d.number_of_files is None and d.size_bytes is None and d.size_gb is None
     assert d.file_types == {"images": 3} and d.extensions == {}
     assert d.url == "https://download.brainimagelibrary.org/ab/cd/abcdef/sub/"
+
+
+def test_concurrent_cold_loads_do_not_race(tmp_path: object) -> None:
+    import concurrent.futures as cf
+    from pathlib import Path
+
+    bil.enable_cache(cache_dir=str(Path(str(tmp_path)) / "race"))
+    try:
+        with cf.ThreadPoolExecutor(6) as ex:
+            sizes = list(ex.map(lambda _: len(bil.BilCatalog.load()), range(6)))
+        assert len(set(sizes)) == 1
+        assert not list((Path(str(tmp_path)) / "race").glob("*.part"))
+    finally:
+        bil.enable_cache(cache_dir=str(Path(str(tmp_path)).parent / "bil-cache0"))

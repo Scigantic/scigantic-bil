@@ -8,10 +8,32 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
 from ._client import DOWNLOAD_BASE
 
 _BIL_DATA_PREFIX = "/bil/data/"
+
+
+def encode_path(path: str) -> str:
+    """Percent-encode a URL path the way BIL's nginx serves it, idempotently
+    (decode first, then encode, so an already-encoded href is not encoded
+    twice). Needed because 39 inventory paths carry spaces, ``#`` or
+    non-ASCII characters (2026-07-31 inventory); an unencoded ``#`` is a
+    URL fragment, so ``.../Virus_tracing-B1-#6/`` silently requested
+    ``.../Virus_tracing-B1-`` and 404'd. The server itself lists that
+    directory as ``Virus_tracing-B1-%236/``."""
+    return quote(unquote(path), safe="/")
+
+
+def encode_url(url: str) -> str:
+    """encode_path() applied to the path of a full URL, host untouched."""
+    parts = urlsplit(url)
+    if not parts.scheme:
+        return encode_path(url)
+    # A raw '#' in the path would have been parsed as a fragment; put it back.
+    path = parts.path + (("#" + parts.fragment) if parts.fragment else "")
+    return urlunsplit((parts.scheme, parts.netloc, encode_path(path), parts.query, ""))
 
 
 def dataset_url(bildirectory: str) -> str:
@@ -19,13 +41,13 @@ def dataset_url(bildirectory: str) -> str:
     its public HTTPS location on the download server. Verified 2026-09-08
     against BIL's documented pattern
     ``https://download.brainimagelibrary.org/<c1c2>/<c3c4>/<uuid>/...``.
-    Always ends in a slash."""
+    Always ends in a slash; the path is percent-encoded (see encode_path)."""
     path = bildirectory.strip()
     if path.startswith(_BIL_DATA_PREFIX):
         path = path[len(_BIL_DATA_PREFIX) :]
     elif path.startswith(DOWNLOAD_BASE):
         path = path[len(DOWNLOAD_BASE) :]
-    path = path.strip("/")
+    path = encode_path(path.strip("/"))
     return f"{DOWNLOAD_BASE}/{path}/" if path else f"{DOWNLOAD_BASE}/"
 
 
