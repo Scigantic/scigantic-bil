@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scigantic-bil"
+version = "0.1.0"
+description = "Search the Brain Image Library (14,000+ BICCN/BICAN brain microscopy datasets, 6 PB) and read light-sheet, fMOST and STPT volumes over HTTP without downloading them: a typed catalog over BIL's daily inventory and metadata API, lazy file listing, single-slice TIFF reads, thumbnails, and OME-Zarr access."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT-0" }
+authors = [{ name = "Scigantic" }]
+keywords = ["brain-image-library", "biccn", "light-sheet", "microscopy", "neuroscience", "fmost", "stpt", "ome-zarr", "tiff", "whole-brain"]
+classifiers = [
+  "License :: OSI Approved :: MIT No Attribution License (MIT-0)",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+
+dependencies = [
+  # Upper bounds checked live against each package's current PyPI major on
+  # 2026-09-08 (requests 2.x, numpy 2.x, tifffile 2025.x); defensive
+  # ceilings, not a response to a known break in any next major.
+  "requests>=2.28,<3",
+  "numpy>=1.24,<3",
+  "tifffile>=2023.7,<2027",
+]
+
+[project.optional-dependencies]
+# zarr is only needed for open_zarr(); every other function works without
+# it. zarr 3 reads HTTP stores through fsspec, which needs aiohttp for http.
+# Pinned to zarr 3.x on purpose: several BIL stores are zarr v2, which
+# zarr 3 still reads, and the Scigantic neuroscience notebook image asserts
+# zarr stays at 3.x (ngff-zarr needs it).
+zarr = ["zarr>=3,<4", "fsspec>=2024.1", "aiohttp>=3.9,<4"]
+pandas = ["pandas>=1.5,<4"]
+dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs", "pillow>=10"]
+
+[project.urls]
+Homepage = "https://scigantic.com"
+Repository = "https://github.com/Scigantic/scigantic-bil"
+Issues = "https://github.com/Scigantic/scigantic-bil/issues"
+
+[project.scripts]
+scigantic-bil = "scigantic_bil.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+scigantic_bil = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["tifffile", "tifffile.*", "zarr", "zarr.*", "fsspec", "fsspec.*", "PIL", "PIL.*"]
+ignore_missing_imports = true
