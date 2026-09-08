@@ -280,9 +280,12 @@ def _collapse_stores(entries: list[FileEntry]) -> Iterator[FileEntry]:
         )
 
 
+IMAGE_SUFFIXES = (".tif", ".tiff", ".ome.tif", ".ome.tiff", ".jp2", ".j2k", ".jpx")
+
+
 def find(
     target: str | Dataset | DatasetDetail,
-    suffix: str | tuple[str, ...] = (".tif", ".tiff", ".ome.tif", ".ome.tiff"),
+    suffix: str | tuple[str, ...] = IMAGE_SUFFIXES,
     recursive: bool = True,
 ) -> list[FileEntry]:
     """Files under ``target`` whose name ends with ``suffix``
@@ -297,7 +300,7 @@ def find(
 
 def first_images(
     target: str | Dataset | DatasetDetail,
-    suffix: str | tuple[str, ...] = (".tif", ".tiff", ".ome.tif", ".ome.tiff"),
+    suffix: str | tuple[str, ...] = IMAGE_SUFFIXES,
     max_depth: int = 8,
 ) -> list[FileEntry]:
     """The first folder of image files under ``target``, found by a bounded

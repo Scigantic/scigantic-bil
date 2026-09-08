@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scigantic-bil"
-version = "0.2.0"
-description = "Search the Brain Image Library (14,000+ BICCN/BICAN brain microscopy datasets, 6 PB) and read light-sheet, fMOST and STPT volumes over HTTP without downloading them: a typed catalog over BIL's daily inventory and metadata API, lazy file listing, single-slice TIFF reads, thumbnails, and OME-Zarr access."
+version = "0.3.0"
+description = "Search the Brain Image Library (14,000+ BICCN/BICAN brain microscopy datasets, 6 PB) and read light-sheet, fMOST, STPT and tracing volumes (TIFF, OME-TIFF, JPEG 2000, OME-Zarr) over HTTP without downloading them: a typed catalog over BIL's daily inventory and metadata API, lazy file listing, single-slice TIFF reads, thumbnails, and OME-Zarr access."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT-0" }

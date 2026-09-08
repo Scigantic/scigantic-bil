@@ -11,7 +11,7 @@
         <img alt="License" src="https://img.shields.io/github/license/Scigantic/scigantic-bil" /></a>
 </p>
 
-Search the [Brain Image Library](https://www.brainimagelibrary.org/) and read its light-sheet, fMOST and STPT volumes over HTTP. No download, no account, no local copy.
+Search the [Brain Image Library](https://www.brainimagelibrary.org/) and read its light-sheet, fMOST, STPT and tracing volumes over HTTP. No download, no account, no local copy.
 
 ```python
 import scigantic_bil as bil
@@ -44,6 +44,7 @@ This package is the other half. It reads BIL in place:
 - **Single-slice TIFF reads** straight from the download server. The dominant BIL layout is one TIFF per z-plane, about 16 MB each; one slice is one request.
 - **OME-Zarr stores** opened lazily through zarr's HTTP store, with pyramid levels checked against what the server actually has (one BIL store declares eight levels and serves seven).
 - **Thumbnails that read as little as possible**: the middle slice of a TIFF stack, or the coarsest level of a zarr pyramid.
+- **JPEG 2000 sections read in place** (5,787 datasets, `.jp2`): exact decode through imagecodecs' OpenJPEG, reduced-resolution previews through Pillow for the large RGB sections.
 - **Bounded previews of files of any size.** `preview_plane()` reads the coarsest pyramid level, or every k-th row by offset from an uncompressed plane, or a sample of strips, or a centre region of a tiled page. A 10 GB single-strip MERFISH mosaic previews from 63 MB of reads; `asarray()` would fetch all 10 GB.
 - **fMOST TeraFly trees** (`RES_<x>x<y>x<z>_/` folders, 985 datasets) previewed from the coarsest resolution folder, stitched. The full-resolution folder of one such brain holds 1.6 million files and is never listed.
 - **A seekable HTTP file object** (`HttpFile`) so tifffile fetches only the IFDs, pages, tiles or regions you ask for from a large TIFF, with `read_region()` for a rectangle of a tiled page.
@@ -60,6 +61,8 @@ Measured on 2026-09-08 from a residential connection, against the live archive:
 | Thumbnail of a 50 GB OME-Zarr store (848 x 6300 x 9600) | 0.65 s, coarsest level only |
 | Thumbnail of a 4.5 TB fMOST TeraFly brain | 4 to 5 s, coarsest resolution folder, about 25 small block reads |
 | Preview of a 10 GB single-strip plane (84289 x 61974 uint16) | 11 s, 512 rows fetched by offset |
+| Read a 12 MB JPEG 2000 STPT section (11377 x 8557 uint16) | 0.4 s fetch, 1.5 s decode |
+| Preview a 75 MB JPEG 2000 RGB tracing section | 5 s at 1/4 resolution, 10 s for a full decode |
 | Open a 21.7 GB, 92-page BigTIFF OME-TIFF and read a 512 x 512 region | 7 s to walk the IFDs, 1.3 s for the region |
 | Read one full 1 GB page of that file | 27 s at 38 MB/s in 6 range requests |
 | Eight parallel streams on 16 MB slices | 32 MB/s aggregate against 39 MB/s for one stream |
@@ -149,9 +152,21 @@ bil.first_images("ace-owl-cot")          # the first folder of TIFFs by bounded 
 
 `thumbnail()` tries these in order: a TeraFly tree, an OME-Zarr store, then the first folder of TIFFs. It never lists a whole tree; the unbounded version sat on a 1.6 million file fMOST dataset for over twenty minutes before the bound existed.
 
+### JPEG 2000
+
+5,787 datasets are `.jp2`: most STPT sections and nearly all the viral tracing and enhancer-labelling brains from the Dong lab. They read in place through imagecodecs' bundled OpenJPEG, no system library:
+
+```python
+bil.read_jp2(entry)              # exact: a 12 MB STPT section -> (11377, 8557) uint16 in 1.5 s
+bil.read_jp2(entry, reduce=3)    # 1/8 resolution through Pillow, 8-bit, for the 75 to 550 MB RGB sections
+bil.read_image(entry)            # read_tiff or read_jp2 by extension; slices()/read_stack() accept both
+```
+
+`thumbnail()` and `preview_plane()` handle `.jp2` folders: small sections decode fully, large ones at reduced resolution (a 75 MB tracing section previews in about 5 s instead of 10 s of full decode; a 460 MB enhancer section is dominated by its own transfer). Two limits, both checked live: BIL's codestreams do not decode truncated, so the whole file is always fetched, and Pillow's reduced decode does not take 16-bit single-channel files, which fall back to a full decode.
+
 ### What it does not read
 
-Formats this package does not decode raise `UnsupportedFormatError` naming what does. Across the archive's techniques the big one is JPEG 2000 (`.jp2`, 5,787 datasets: most STPT sections, viral tracing and enhancer-labelling brains): `download()` then glymur. Also Imaris `.ims` (HDF5, h5py), NIfTI (nibabel), MERFISH `.dax` frames (raw uint16, numpy), SWC morphologies (navis), and tables (pandas). Reading `.jp2` in place is the obvious next addition; the format has resolution levels built in, so a preview should not need the whole file.
+Formats this package does not decode raise `UnsupportedFormatError` naming what does: Imaris `.ims` (HDF5, h5py), NIfTI (nibabel), MERFISH `.dax` frames (raw uint16, numpy), SWC morphologies (navis), and tables (pandas).
 
 ### OME-Zarr
 
@@ -188,7 +203,7 @@ $ scigantic-bil thumbnail ace-bin-run slice.png --size 512
 
 ## Testing
 
-Every test runs live against BIL, no mocks, the same philosophy as the rest of the scigantic-* packages. The suite takes one to two minutes depending on the server and includes the stress cases above: the 21 GB OME-TIFF, the 10 GB plane, the `#` path, the 4.7 million file manifest guard, the TeraFly tree, the Pillow fallback, six threads loading the catalog cold. CI runs Python 3.10 through 3.14 plus `mypy --strict`.
+Every test runs live against BIL, no mocks, the same philosophy as the rest of the scigantic-* packages. The suite takes two to five minutes depending on the server and includes the stress cases above: the 21 GB OME-TIFF, the 10 GB plane, the `#` path, the 4.7 million file manifest guard, the TeraFly tree, the Pillow fallback, six threads loading the catalog cold. CI runs Python 3.10 through 3.14 plus `mypy --strict`.
 
 ## License
 
