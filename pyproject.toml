@@ -38,8 +38,15 @@ dependencies = [
 # it. zarr 3 reads HTTP stores through fsspec, which needs aiohttp for http.
 # Pinned to zarr 3.x on purpose: several BIL stores are zarr v2, which
 # zarr 3 still reads, and the Scigantic neuroscience notebook image asserts
-# zarr stays at 3.x (ngff-zarr needs it).
-zarr = ["zarr>=3,<4", "fsspec>=2024.1", "aiohttp>=3.9,<4"]
+# zarr stays at 3.x (ngff-zarr needs it). zarr 3 itself requires Python
+# 3.11 (verified: pip on 3.10 finds no zarr>=3), so the extra is a no-op on
+# 3.10 and the zarr tests skip there; CI's 3.10 leg is how the
+# without-zarr path stays exercised.
+zarr = [
+  "zarr>=3,<4; python_version >= '3.11'",
+  "fsspec>=2024.1; python_version >= '3.11'",
+  "aiohttp>=3.9,<4; python_version >= '3.11'",
+]
 pandas = ["pandas>=1.5,<4"]
 dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs", "pillow>=10"]
 
