@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import re
+import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Iterable, Iterator
@@ -57,9 +59,15 @@ def _inventory_text(date: str, refresh: bool = False) -> str:
     resp = send("GET", f"{_INVENTORY_DIR}{date}.tsv", timeout=300.0)
     text = resp.content.decode("utf-8")
     if cache.is_cache_enabled():
-        tmp = path.with_suffix(".tsv.part")
+        # Unique per writer: two threads loading the catalog cold at the same
+        # time (a notebook with a thread pool, a test session) must not share
+        # a temp path, or the second os.replace() fails with FileNotFoundError
+        # once the first has moved it. Measured: 2 of 6 concurrent cold loads
+        # crashed before this. Both write an identical immutable snapshot, so
+        # last-writer-wins is fine.
+        tmp = path.with_suffix(f".tsv.{uuid.uuid4().hex}.part")
         tmp.write_text(text, encoding="utf-8")
-        tmp.replace(path)
+        os.replace(tmp, path)
     return text
 
 

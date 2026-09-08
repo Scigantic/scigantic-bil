@@ -120,7 +120,7 @@ def clear() -> int:
     Returns how many files were removed."""
     d = _resolve_dir()
     n = 0
-    for pattern in ("*.json", "*.part", "inventory-*.tsv"):
+    for pattern in ("*.json", "*.part", "inventory-*.tsv", "inventory-*.tsv.*.part"):
         for f in d.glob(pattern):
             f.unlink()
             n += 1

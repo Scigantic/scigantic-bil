@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scigantic-bil"
-version = "0.1.0"
+version = "0.2.0"
 description = "Search the Brain Image Library (14,000+ BICCN/BICAN brain microscopy datasets, 6 PB) and read light-sheet, fMOST and STPT volumes over HTTP without downloading them: a typed catalog over BIL's daily inventory and metadata API, lazy file listing, single-slice TIFF reads, thumbnails, and OME-Zarr access."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -31,6 +31,15 @@ dependencies = [
   "requests>=2.28,<3",
   "numpy>=1.24,<3",
   "tifffile>=2023.7,<2027",
+  # tifffile decodes LZW, Deflate and JPEG-in-TIFF only through imagecodecs.
+  # BIL's fMOST TeraFly blocks are LZW (ace-cap-cop, verified 2026-09-08);
+  # without this, read_tiff() on them raises "requires the 'imagecodecs'
+  # package". Binary wheels exist for every CI target.
+  "imagecodecs>=2023.9",
+  # Fallback decoder for TIFFs tifffile rejects (ImageJ Deflate stacks whose
+  # strips overrun their declared rows: libdeflate says INSUFFICIENT_SPACE,
+  # Pillow decodes them). Also renders the CLI's thumbnail PNGs.
+  "pillow>=10,<13",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +57,7 @@ zarr = [
   "aiohttp>=3.9,<4; python_version >= '3.11'",
 ]
 pandas = ["pandas>=1.5,<4"]
-dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs", "pillow>=10"]
+dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs"]
 
 [project.urls]
 Homepage = "https://scigantic.com"

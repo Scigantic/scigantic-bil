@@ -78,3 +78,39 @@ def test_disable_cache_forces_network(monkeypatch: pytest.MonkeyPatch) -> None:
         assert calls
     finally:
         bil.enable_cache()
+
+
+def test_send_retries_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scigantic_bil import _client
+
+    calls: list[int] = []
+
+    class Resp:
+        def __init__(self, code: int) -> None:
+            self.status_code = code
+            self.url = "https://x/"
+            self.text = ""
+            self.headers: dict[str, str] = {}
+
+        def close(self) -> None:
+            pass
+
+    class Session:
+        headers: dict[str, str] = {}
+
+        def request(self, *a: object, **k: object) -> Resp:
+            calls.append(1)
+            return Resp(503 if len(calls) < 3 else 200)
+
+    monkeypatch.setattr(_client, "_session", Session())
+    monkeypatch.setattr(_client.time, "sleep", lambda s: None)
+    resp = _client.send("GET", "https://x/")
+    assert resp.status_code == 200 and len(calls) == 3
+
+
+def test_retrieve_many_thousand_ids(catalog: bil.BilCatalog) -> None:
+    import random
+
+    ids = random.Random(3).sample([d.bildid for d in catalog.datasets], 300)
+    got = bil.retrieve_many(ids)
+    assert len(got) >= 295  # a handful of inventory ids can lag the API

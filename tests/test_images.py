@@ -26,7 +26,8 @@ def test_httpfile_reads_only_what_tifffile_asks_for() -> None:
     with tifffile.TiffFile(fh) as tif:
         arr = np.asarray(tif.asarray())
     assert arr.shape == (4501, 3828)
-    assert 0 < fh.bytes_fetched <= (entry.size or 0)
+    # block rounding and one direct span can overlap a cached block slightly
+    assert 0 < fh.bytes_fetched <= (entry.size or 0) * 1.1
     assert fh.requests_made >= 1
     # seek/tell semantics a file object must honour
     fh.seek(0)
@@ -107,3 +108,65 @@ def test_open_zarr_without_zarr_installed_is_a_clear_import_error(monkeypatch: p
     monkeypatch.setattr(builtins, "__import__", no_zarr)
     with pytest.raises(ImportError, match="scigantic-bil\\[zarr\\]"):
         bil.open_zarr(ZARR_STORE)
+
+
+def test_httpfile_large_reads_bypass_block_cache() -> None:
+    entry = bil.slices(TIFF_STACK)[20]
+    fh = bil.HttpFile(entry.url, size=entry.size)
+    fh.seek(0)
+    small = fh.read(1000)  # block cache: one 256 KB request
+    assert len(small) == 1000 and fh.requests_made == 1 and fh.bytes_fetched == 256 << 10
+    fh.seek(1 << 20)
+    big = fh.read(2 << 20)  # direct: exactly one 2 MB request
+    assert len(big) == 2 << 20 and fh.requests_made == 2 and fh.bytes_fetched == (256 << 10) + (2 << 20)
+
+
+def test_tiff_info_and_region_on_21gb_ome_tiff() -> None:
+    pytest.importorskip("zarr")
+    entry = [f for f in bil.list_files("ace-dud-fib") if f.name.endswith(".ome.tiff")][0]
+    info = bil.tiff_info(entry)
+    assert info["bigtiff"] and info["ome"] and info["pages"] == 92 and info["tiled"]
+    assert info["shape"][-2:] == (33210, 14904)
+    assert info["metadata_bytes_read"] < 40_000_000  # 25 MB measured with 256 KB blocks, 81 MB with 1 MB
+    region = bil.read_region(entry, rows=(16000, 16512), cols=(7000, 7512))
+    assert region.shape == (512, 512) and region.dtype == np.uint16
+
+
+def test_preview_plane_bounds_reads_on_a_10gb_plane() -> None:
+    import time
+
+    entries = bil.first_images("ace-dud-vow")
+    entry = next(e for e in entries if e.name == "mosaic_DAPI_z3.tif")
+    assert entry.size and entry.size > 10_000_000_000
+    t0 = time.time()
+    th = bil.preview_plane(entry, max_size=128)
+    assert th.ndim == 2 and max(th.shape) <= 128 and th.max() > 0
+    assert time.time() - t0 < 120
+
+
+def test_preview_plane_strip_sampling_keeps_width() -> None:
+    entry = bil.first_images("ace-ace-leg")[30]  # 5-page 9660 x 16644 stripped file, 1.6 GB
+    th = bil.preview_plane(entry, max_size=128)
+    assert th.ndim == 2 and th.shape[1] > 16
+
+
+def test_pillow_fallback_decodes_imagej_deflate_stack() -> None:
+    entries = bil.first_images("ace-owl-cot")
+    entry = next(e for e in entries if e.name == "atlaslabel_def.tif")
+    a = bil.read_tiff(entry)  # tifffile+libdeflate: INSUFFICIENT_SPACE; Pillow decodes it
+    assert a.shape == (253, 575, 377) and a.dtype == np.uint16
+
+
+def test_terafly_levels_and_thumbnail() -> None:
+    levels = bil.terafly_levels("ace-cap-cop")
+    assert [d for d, _ in levels][0] == (793, 1268, 350) and len(levels) == 6
+    th = bil.thumbnail("ace-cap-cop", max_size=256)
+    assert th.ndim == 2 and max(th.shape) <= 256 and th.max() > 0
+    assert bil.terafly_levels(TIFF_STACK) == []
+
+
+def test_thumbnail_error_names_the_right_tool() -> None:
+    with pytest.raises(bil.UnsupportedFormatError, match="glymur"):
+        bil.thumbnail("ace-bit-wig")  # STPT, .jp2 only
+    with pytest.raises(bil.UnsupportedFormatError, match="navis"):
+        bil.thumbnail("ace-nap-out")  # .swc only
