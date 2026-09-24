@@ -201,11 +201,12 @@ def test_out_of_range_page_index_and_region_raise_index_error() -> None:
     with pytest.raises(IndexError, match="out of range"):
         bil.read_tiff(entry, key=5)
     with pytest.raises(IndexError, match="out of range"):
+        bil.thumbnail(TIFF_STACK, index=99999, max_size=64)
+    pytest.importorskip("zarr")  # read_region needs the zarr extra, absent on 3.10
+    with pytest.raises(IndexError, match="out of range"):
         bil.read_region(entry, page=5)
     with pytest.raises(IndexError, match="select nothing"):
         bil.read_region(entry, rows=(10**6, 10**6 + 10))
-    with pytest.raises(IndexError, match="out of range"):
-        bil.thumbnail(TIFF_STACK, index=99999, max_size=64)
 
 
 def test_bad_arguments_fail_before_any_download() -> None:
