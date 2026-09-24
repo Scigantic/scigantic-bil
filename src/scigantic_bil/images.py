@@ -42,6 +42,12 @@ if TYPE_CHECKING:
 
 _WHOLE_FILE_LIMIT = 64 << 20
 _BLOCK = 256 << 10
+# preview_plane()/thumbnail() refuse to fetch a JPEG 2000 file larger than
+# this for a preview. JPEG 2000 cannot be read partially on BIL (see
+# read_jp2), so a preview of a single-file RGB section costs the whole
+# file: 320 to 666 MB and 25 to 53 s each on the 2026-09-23 sample. 512 MB
+# keeps the README's 460 MB enhancer section working and stops the rest.
+PREVIEW_MAX_BYTES = 512 << 20
 
 _TIFF_SUFFIXES = (".tif", ".tiff", ".ome.tif", ".ome.tiff")
 _JP2_SUFFIXES = (".jp2", ".j2k", ".jpx")
@@ -210,10 +216,18 @@ def read_tiff(target: FileEntry | str, key: int | Sequence[int] | None = None) -
         with tifffile.TiffFile(cast("IO[bytes]", fh)) as tif:
             if key is None:
                 return np.asarray(tif.asarray())
+            _check_pages(key, len(tif.pages), url)
             return np.asarray(tif.asarray(key=key))
     except _DECODE_ERRORS as exc:
         fh.seek(0)
         return _decode_with_pillow(cast("IO[bytes]", fh), key=key, url=url, cause=exc)
+
+
+def _check_pages(key: int | Sequence[int], n_pages: int, url: str) -> None:
+    keys = [key] if isinstance(key, int) else list(key)
+    bad = [k for k in keys if not -n_pages <= k < n_pages]
+    if bad:
+        raise IndexError(f"page {bad[0]} is out of range: {url} has {n_pages} page(s)")
 
 
 def read_jp2(target: FileEntry | str, reduce: int = 0) -> np.ndarray:
@@ -286,7 +300,12 @@ def _open_tiff(url: str, size: int | None) -> tuple[Any, HttpFile | None]:
     return tifffile.TiffFile(cast("IO[bytes]", fh)), fh
 
 
-def preview_plane(target: FileEntry | str, max_size: int = 512, page: int | None = None) -> np.ndarray:
+def preview_plane(
+    target: FileEntry | str,
+    max_size: int = 512,
+    page: int | None = None,
+    max_bytes: int | None = PREVIEW_MAX_BYTES,
+) -> np.ndarray:
     """A downsampled 2-D preview of one TIFF, reading a bounded amount
     however large the file is. Which page: ``page``, else the middle one.
     How it reads, by what the page is:
@@ -300,11 +319,15 @@ def preview_plane(target: FileEntry | str, max_size: int = 512, page: int | None
       because a uniform decimation of a tiled page touches every tile
     - anything under 64 MB: read whole, then stride-downsampled
     - JPEG 2000: full decode for small sections, Pillow reduced-resolution
-      decode (1/4 or 1/8) for large ones; see read_jp2()
+      decode (1/4 or 1/8) for large ones; see read_jp2(). The whole file is
+      fetched either way, so a file over ``max_bytes`` (PREVIEW_MAX_BYTES,
+      512 MB) raises BilError instead; pass max_bytes=None to fetch it.
 
     read_tiff()/read_jp2() remain the exact readers; this is for looking."""
     import tifffile
 
+    if max_size < 1:
+        raise ValueError(f"max_size must be at least 1, got {max_size}")
     url, size = _entry_of(target)
     if url.lower().endswith(_JP2_SUFFIXES):
         if size is None:
@@ -312,6 +335,12 @@ def preview_plane(target: FileEntry | str, max_size: int = 512, page: int | None
             length = head.headers.get("Content-Length")
             head.close()
             size = int(length) if length else None
+        if max_bytes is not None and size is not None and size > max_bytes:
+            raise BilError(
+                f"{url} is {size / 1e6:.0f} MB and JPEG 2000 cannot be read partially, so a "
+                f"preview would fetch it whole; over the {max_bytes / 1e6:.0f} MB limit. Pass "
+                "max_bytes=None to fetch it anyway, or read_jp2(entry, reduce=3) directly."
+            )
         # Small sections (STPT, ~12 MB) decode fully in a second or two.
         # Big RGB sections (75 to 550 MB) decode at reduced resolution;
         # a guess of reduce from the byte size keeps the decode under a
@@ -486,9 +515,18 @@ def read_region(
     r = rows if isinstance(rows, slice) else slice(rows[0], rows[1])
     c = cols if isinstance(cols, slice) else slice(cols[0], cols[1])
     with tifffile.TiffFile(cast("IO[bytes]", fh)) as tif:
+        _check_pages(page, len(tif.pages), url)
         store = tif.aszarr(key=page, level=level) if level else tif.aszarr(key=page)
         try:
             arr: Any = zarr.open(store, mode="r")
+            height, width = int(arr.shape[-2]), int(arr.shape[-1])
+            for name, sl, extent in (("rows", r, height), ("cols", c, width)):
+                start, stop, _ = sl.indices(extent)
+                if stop <= start:
+                    raise IndexError(
+                        f"{name} {sl.start}:{sl.stop} select nothing from a page of "
+                        f"{height} x {width} pixels (level {level} of {url})"
+                    )
             plane = arr[r, c] if arr.ndim == 2 else arr[..., r, c]
         finally:
             store.close()
@@ -515,9 +553,17 @@ def read_stack(
     """Stack a range of z-slices into one ``(z, y, x)`` array. Reads one
     file per slice, sequentially; ``step`` subsamples along z. Keep the
     range small: a full 2,000-slice stack is ~30 GB."""
-    entries = slices(target, channel=channel)[start:stop:step]
+    if step < 1:
+        raise ValueError(f"step must be at least 1, got {step}")
+    found = slices(target, channel=channel)
+    if not found:
+        raise BilError(
+            f"no TIFF or JPEG 2000 slices found under {resolve_url(target)}"
+            + (f" whose name contains {channel!r}" if channel else "")
+        )
+    entries = found[start:stop:step]
     if not entries:
-        raise BilError(f"no TIFF or JPEG 2000 slices found under {resolve_url(target)}")
+        raise BilError(f"start={start}, stop={stop}, step={step} selects none of the {len(found)} slices")
     planes = [_squeeze_2d(read_image(e)) for e in entries]
     return np.stack(planes, axis=0)
 
@@ -526,6 +572,8 @@ def downsample(array: np.ndarray, max_size: int = 512) -> np.ndarray:
     """Stride-subsample a 2-D (or 2-D plus channel) array so its longest
     edge is at most ``max_size``. Integer stride, no filtering: cheap,
     and adequate for a preview."""
+    if max_size < 1:
+        raise ValueError(f"max_size must be at least 1, got {max_size}")
     if array.ndim < 2:
         return array
     h, w = array.shape[:2]
@@ -538,15 +586,20 @@ def thumbnail(
     max_size: int = 512,
     index: int | None = None,
     channel: str | None = None,
+    max_bytes: int | None = PREVIEW_MAX_BYTES,
 ) -> np.ndarray:
     """A small 2-D preview of a dataset, reading as little as possible and
     never crawling a whole tree. In order: a FileEntry is read directly;
     a TeraFly (fMOST) tree's coarsest resolution folder, stitched; an
     OME-Zarr store's coarsest level; else the first folder of TIFF or
-    JPEG 2000 slices found by a bounded descent, middle slice. ``index`` picks a slice; ``channel``
-    keeps only file names containing it (``"ch02"``)."""
+    JPEG 2000 slices found by a bounded descent, middle slice. ``index``
+    picks a slice; ``channel`` keeps only file names containing it
+    (``"ch02"``); ``max_bytes`` bounds a JPEG 2000 fetch (see
+    preview_plane)."""
+    if max_size < 1:
+        raise ValueError(f"max_size must be at least 1, got {max_size}")
     if isinstance(target, FileEntry):
-        return preview_plane(target, max_size=max_size, page=index)
+        return preview_plane(target, max_size=max_size, page=index, max_bytes=max_bytes)
     # TeraFly first: it is two listings and rules out the crawl below on
     # the trees where that crawl is most expensive.
     levels = terafly_levels(target)
@@ -556,13 +609,21 @@ def thumbnail(
     if stores:
         return zarr_thumbnail(stores[0], max_size=max_size, index=index)
     stack = first_images(target, suffix=_IMAGE_SUFFIXES)
-    if channel:
-        stack = [e for e in stack if channel.lower() in e.name.lower()]
+    if channel and stack:
+        kept = [e for e in stack if channel.lower() in e.name.lower()]
+        if not kept:
+            raise BilError(
+                f"none of the {len(stack)} image files under {resolve_url(target)} contain "
+                f"{channel!r} (names look like {stack[0].name!r})"
+            )
+        stack = kept
     if stack:
         i = len(stack) // 2 if index is None else index
+        if not -len(stack) <= i < len(stack):
+            raise IndexError(f"index {i} is out of range: {len(stack)} slices under {resolve_url(target)}")
         # One file per z-plane: preview the chosen slice. One multi-page or
         # giant file: preview_plane picks a middle page and bounds the read.
-        return preview_plane(stack[i], max_size=max_size)
+        return preview_plane(stack[i], max_size=max_size, max_bytes=max_bytes)
     exts = extensions_under(target)
     raise UnsupportedFormatError(
         f"no TIFF or JPEG 2000 slices, zarr store or TeraFly tree under {resolve_url(target)}; "

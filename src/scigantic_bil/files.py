@@ -169,24 +169,48 @@ def list_files(target: str | Dataset | DatasetDetail) -> list[FileEntry]:
     """Entries of one directory (not recursive). Cached.
 
     A 404 on a dataset's own directory usually means BIL's inventory path
-    is stale (the directory was renamed on the server; seen for
-    ``IV68_..._ventral midbrain_...`` listed with a space where the server
-    has an underscore). The error says so and names the parent to list."""
+    is stale. The one systematic case is a directory name with spaces
+    (``IV68_..._ventral midbrain_...``) that the server holds with
+    underscores: 36 of the 39 such inventory rows 404'd and all 138 names
+    under that project matched after the swap (2026-09-23), so that
+    variant is tried before giving up. The entries returned then carry
+    the server's real URLs. Any other 404 says so and names the parent
+    to list."""
     url = resolve_url(target)
     cached = cache.get("listing", url)
     if cached is None:
         try:
             resp = send("GET", url, timeout=120.0)
+            listing_url = url
         except BilNotFoundError as exc:
-            parent = url.rstrip("/").rsplit("/", 1)[0] + "/"
-            raise BilNotFoundError(
-                f"{url} does not exist on the download server. If this came from a dataset's "
-                f"bildirectory, BIL's inventory path may be stale; list the parent {parent} "
-                "to find the current name."
-            ) from exc
-        cached = _parse_listing(resp.text, url)
+            alt = _underscore_variant(url)
+            if alt is None:
+                raise _stale_path_error(url) from exc
+            try:
+                resp = send("GET", alt, timeout=120.0)
+            except BilNotFoundError:
+                raise _stale_path_error(url) from exc
+            listing_url = alt
+        cached = _parse_listing(resp.text, listing_url)
         cache.put("listing", url, None, cached)
     return [FileEntry(**row) for row in cached]
+
+
+def _underscore_variant(url: str) -> str | None:
+    """The same URL with every space in its path replaced by an
+    underscore, or None if there are no spaces (encoded as %20) to swap."""
+    if "%20" not in url:
+        return None
+    return url.replace("%20", "_")
+
+
+def _stale_path_error(url: str) -> BilNotFoundError:
+    parent = url.rstrip("/").rsplit("/", 1)[0] + "/"
+    return BilNotFoundError(
+        f"{url} does not exist on the download server. If this came from a dataset's "
+        f"bildirectory, BIL's inventory path may be stale; list the parent {parent} "
+        "to find the current name."
+    )
 
 
 def _parse_listing(html: str, base_url: str) -> list[dict[str, object]]:
@@ -223,12 +247,27 @@ def is_store_dir(entry: FileEntry) -> bool:
     return entry.is_dir and entry.name.lower().endswith(_OPAQUE_DIR_SUFFIXES)
 
 
-def walk(target: str | Dataset | DatasetDetail, max_depth: int = 8) -> Iterator[FileEntry]:
+WALK_MAX_DIRS = 512
+
+
+def walk(
+    target: str | Dataset | DatasetDetail, max_depth: int = 8, max_dirs: int | None = WALK_MAX_DIRS
+) -> Iterator[FileEntry]:
     """Recursive listing, files only. For a dataset (id, Dataset or
     DatasetDetail) this reads BIL's manifest in one request and collapses
     each zarr/N5 store to a single directory entry; for an arbitrary URL,
-    or when no manifest exists, it crawls the nginx autoindex one request
-    per directory, never entering a store (see is_store_dir)."""
+    or when no manifest exists or it is over MANIFEST_MAX_BYTES, it crawls
+    the nginx autoindex one request per directory, never entering a store
+    (see is_store_dir).
+
+    The crawl lists at most ``max_dirs`` directories (None for no limit)
+    and raises BilError once that budget is spent, after yielding what it
+    found: an fMOST or MERFISH dataset with a million files has a manifest
+    too large to load by default and a tree too large to crawl (ace-boo-sag,
+    1.8 M files: 51 entries in 90 s before this budget existed). For those,
+    ``manifest(bildid, max_bytes=None)`` loads the full manifest in one
+    request, and first_images()/find_zarr() answer the preview questions
+    without a crawl."""
     b = _bildid_of(target)
     if b is not None:
         try:
@@ -240,8 +279,17 @@ def walk(target: str | Dataset | DatasetDetail, max_depth: int = 8) -> Iterator[
             return
     root = resolve_url(target)
     stack: list[tuple[str, int]] = [(root, 0)]
+    listed = 0
     while stack:
+        if max_dirs is not None and listed >= max_dirs:
+            raise BilError(
+                f"walk() listed {listed} directories under {root} without reaching the end; "
+                "the tree is too large to crawl. Use manifest(bildid, max_bytes=None) for the "
+                "full file list in one request, first_images()/find_zarr() for previews, or "
+                "pass max_dirs=None to keep crawling."
+            )
         url, depth = stack.pop()
+        listed += 1
         for entry in list_files(url):
             if is_store_dir(entry):
                 yield entry

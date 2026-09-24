@@ -32,3 +32,11 @@ def test_info_files_thumbnail(tmp_path: object, capsys: pytest.CaptureFixture[st
     from PIL import Image
 
     assert max(Image.open(out).size) <= 64
+
+
+def test_errors_are_one_line_not_a_traceback(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["info", "zzz-zzz-zzz"]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("scigantic-bil: BilNotFoundError:") and "Traceback" not in err
+    assert main(["filter", "--extension", "tif", "--limit", "1"]) == 0
+    assert len(capsys.readouterr().out.strip().splitlines()) == 1

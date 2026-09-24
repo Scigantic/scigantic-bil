@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import scigantic_bil as bil
 
 
@@ -102,3 +104,16 @@ def test_concurrent_cold_loads_do_not_race(tmp_path: object) -> None:
         assert not list((Path(str(tmp_path)) / "race").glob("*.part"))
     finally:
         bil.enable_cache(cache_dir=str(Path(str(tmp_path)).parent / "bil-cache0"))
+
+
+def test_load_rejects_a_date_that_is_not_eight_digits() -> None:
+    with pytest.raises(ValueError):
+        bil.BilCatalog.load("../daily/20260923")
+    with pytest.raises(ValueError):
+        bil.BilCatalog.load("2026-09-23")
+
+
+def test_filter_extension_dot_is_optional(catalog: bil.BilCatalog) -> None:
+    with_dot = catalog.filter(extension=".swc")
+    assert with_dot and catalog.filter(extension="swc") == with_dot
+    assert catalog.filter(extension="SWC") == with_dot

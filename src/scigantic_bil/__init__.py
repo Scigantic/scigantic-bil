@@ -17,6 +17,7 @@ from .cache import cache_dir, clear as clear_cache, disable_cache, enable_cache,
 from .catalog import BilCatalog, available_inventory_dates
 from .files import (
     MANIFEST_MAX_BYTES,
+    WALK_MAX_DIRS,
     ManifestTooLargeError,
     download,
     extensions_under,
@@ -31,6 +32,7 @@ from .files import (
     walk,
 )
 from .images import (
+    PREVIEW_MAX_BYTES,
     HttpFile,
     UnsupportedFormatError,
     downsample,
@@ -67,6 +69,8 @@ __all__ = [
     "UnsupportedFormatError",
     "ManifestTooLargeError",
     "MANIFEST_MAX_BYTES",
+    "WALK_MAX_DIRS",
+    "PREVIEW_MAX_BYTES",
     "BilCatalog",
     "available_inventory_dates",
     "Dataset",

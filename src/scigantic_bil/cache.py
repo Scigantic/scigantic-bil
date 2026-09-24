@@ -100,6 +100,9 @@ def get(kind: str, url: str, params: dict[str, Any] | None = None) -> Any | None
         entry = json.loads(file.read_text())
     except (json.JSONDecodeError, OSError):
         return None
+    if not isinstance(entry, dict) or "value" not in entry:
+        file.unlink(missing_ok=True)
+        return None
     if _ttl_seconds is not None and time.time() - entry.get("cached_at", 0) > _ttl_seconds:
         file.unlink(missing_ok=True)
         return None

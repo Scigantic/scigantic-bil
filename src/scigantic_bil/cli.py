@@ -9,6 +9,7 @@ import json
 import sys
 from typing import Sequence
 
+from ._client import BilError
 from .api import retrieve
 from .catalog import BilCatalog
 from .files import find_zarr, list_files, walk
@@ -175,7 +176,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     s.set_defaults(func=_cmd_thumbnail)
 
     args = p.parse_args(argv)
-    result: int = args.func(args)
+    try:
+        result: int = args.func(args)
+    except (BilError, ValueError, IndexError, ImportError, OSError) as exc:
+        # One line, not a traceback: every one of these is an answer about
+        # the input (unknown id, stale path, unsupported format, bad
+        # index, missing output directory), not a crash.
+        print(f"scigantic-bil: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
     return result
 
 

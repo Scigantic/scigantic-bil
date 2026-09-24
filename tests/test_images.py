@@ -194,3 +194,38 @@ def test_jp2_thumbnails_across_producers() -> None:
         th = bil.thumbnail(bildid, max_size=256)
         assert th.ndim == ndim and max(th.shape[:2]) <= 256 and th.max() > 0
         assert time.time() - t0 < 120
+
+
+def test_out_of_range_page_index_and_region_raise_index_error() -> None:
+    entry = bil.slices(TIFF_STACK)[100]
+    with pytest.raises(IndexError, match="out of range"):
+        bil.read_tiff(entry, key=5)
+    with pytest.raises(IndexError, match="out of range"):
+        bil.read_region(entry, page=5)
+    with pytest.raises(IndexError, match="select nothing"):
+        bil.read_region(entry, rows=(10**6, 10**6 + 10))
+    with pytest.raises(IndexError, match="out of range"):
+        bil.thumbnail(TIFF_STACK, index=99999, max_size=64)
+
+
+def test_bad_arguments_fail_before_any_download() -> None:
+    with pytest.raises(ValueError, match="max_size"):
+        bil.thumbnail(TIFF_STACK, max_size=0)
+    with pytest.raises(ValueError, match="max_size"):
+        bil.downsample(np.zeros((10, 10)), max_size=0)
+    with pytest.raises(ValueError, match="step"):
+        bil.read_stack(TIFF_STACK, step=0)
+    with pytest.raises(bil.BilError, match="selects none of the 1923 slices"):
+        bil.read_stack(TIFF_STACK, start=10, stop=5)
+    with pytest.raises(bil.BilError, match="contain 'zzz'"):
+        bil.thumbnail(TIFF_STACK, channel="zzz", max_size=64)
+
+
+def test_jp2_preview_refuses_a_file_over_the_byte_budget() -> None:
+    # A 1 GB single-file RGB section: the preview would fetch it whole.
+    big = bil.FileEntry(name="x.jp2", url="https://download.brainimagelibrary.org/x/y/x.jp2", size=700 << 20, modified="", is_dir=False)
+    with pytest.raises(bil.BilError, match="cannot be read partially"):
+        bil.preview_plane(big, max_size=64)
+    with pytest.raises(bil.BilError, match="cannot be read partially"):
+        bil.thumbnail(big, max_size=64)
+    assert bil.PREVIEW_MAX_BYTES == 512 << 20

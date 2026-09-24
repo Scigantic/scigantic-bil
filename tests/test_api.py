@@ -114,3 +114,10 @@ def test_retrieve_many_thousand_ids(catalog: bil.BilCatalog) -> None:
     ids = random.Random(3).sample([d.bildid for d in catalog.datasets], 300)
     got = bil.retrieve_many(ids)
     assert len(got) >= 295  # a handful of inventory ids can lag the API
+
+
+def test_retrieve_many_all_unknown_batch_is_empty_not_405() -> None:
+    # BIL answers HTTP 405 "POST failure, no entries found" when no id in a
+    # batch exists; that is zero hits, not an error (stress test 2026-09-23).
+    assert bil.retrieve_many(["zzz-zzz-zzz", "yyy-yyy-yyy"]) == {}
+    assert bil.retrieve_many([]) == {}

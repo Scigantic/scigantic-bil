@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 _INVENTORY_DIR = f"{DOWNLOAD_BASE}/inventory/daily/"
 _DAILY_RE = re.compile(r'href="((\d{8})\.tsv)"')
+_DATE_RE = re.compile(r"\d{8}")
 
 _LIGHT_SHEET_TERMS = ("light sheet", "lightsheet", "LSFM")
 
@@ -53,6 +54,10 @@ def _inventory_text(date: str, refresh: bool = False) -> str:
     """The TSV for one date, kept as a plain file in the cache directory
     (``inventory-<date>.tsv``) rather than the JSON response cache: it is
     5 MB and immutable once published, so it never expires."""
+    if not _DATE_RE.fullmatch(date):
+        # The date becomes both a URL segment and a cache file name; anything
+        # but eight digits would escape one or the other.
+        raise ValueError(f"inventory date must be YYYYMMDD, got {date!r}")
     path = cache.cache_dir() / f"inventory-{date}.tsv"
     if path.exists() and not refresh and cache.is_cache_enabled():
         return path.read_text(encoding="utf-8")
@@ -145,7 +150,9 @@ class BilCatalog:
     ) -> list[Dataset]:
         """Case-insensitive substring match on any combination of inventory
         fields. ``extension`` matches datasets containing at least one file
-        with that extension (``".tif"``, ``".swc"``, ``".jp2"``).
+        with that extension (``".tif"``, ``".swc"``, ``".jp2"``; the leading
+        dot is optional). Note the inventory keys ``.ome.tif`` separately
+        from ``.tif``.
         ``light_sheet=True`` uses only the inventory's technique field; use
         BilCatalog.light_sheet() for the fuller union."""
 
@@ -153,6 +160,8 @@ class BilCatalog:
             return needle is None or needle.lower() in value.lower()
 
         ext = extension.lower() if extension else None
+        if ext is not None and not ext.startswith("."):
+            ext = "." + ext  # "tif" and ".tif" mean the same thing here
         out: list[Dataset] = []
         for d in self.datasets:
             if not (

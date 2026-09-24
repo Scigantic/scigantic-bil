@@ -75,8 +75,10 @@ def retrieve(bildid: str) -> DatasetDetail:
 
 def retrieve_many(bildids: list[str]) -> dict[str, DatasetDetail]:
     """Full records for many ids in batched POSTs. Ids BIL does not know
-    are simply absent from the result (the endpoint reports partial success
-    rather than failing the batch)."""
+    are simply absent from the result: the endpoint reports partial success
+    for a mixed batch, and answers HTTP 405 "no entries found" when every
+    id in a batch is unknown, which is treated as an empty batch here rather
+    than an error (found by the 2026-09-23 stress test)."""
     out: dict[str, DatasetDetail] = {}
     pending: list[str] = []
     url = f"{API_BASE}/retrieve"
@@ -101,6 +103,16 @@ def _post_retrieve(bildids: list[str]) -> list[dict[str, Any]]:
     from ._client import get_session
 
     resp = get_session().post(f"{API_BASE}/retrieve", json={"bildids": bildids}, timeout=300.0)
+    if resp.status_code in (404, 405):
+        # BIL's answer to a batch in which no id exists: {"success": "false",
+        # "message": "POST failure, no entries found"}. Not a failure of the
+        # request, just zero hits.
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if str(body.get("success", "")).lower() == "false":
+            return []
     if resp.status_code >= 400:
         raise BilError(f"HTTP {resp.status_code} from POST /retrieve: {resp.text[:300]}")
     body = resp.json()

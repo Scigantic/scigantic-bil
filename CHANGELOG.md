@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.4.0
+
+Fixes from a second run against the live archive on 2026-09-23 (stratified
+listing sweep over 253 datasets, 30 thumbnails across every layout, odd
+API inputs, offline edge cases).
+
+Fixed:
+
+- `walk()` (and so `find()`, `slices()`, `read_stack()`) crawled without
+  limit when a dataset's manifest is over `MANIFEST_MAX_BYTES`: on
+  ace-boo-sag (1.8 million files, 232 MB manifest) it had yielded 51
+  entries after 90 s and was still going. The crawl now lists at most
+  `max_dirs` directories (`WALK_MAX_DIRS`, 512) and raises `BilError`
+  pointing at `manifest(bildid, max_bytes=None)`, `first_images()` and
+  `find_zarr()`.
+- `retrieve_many()` raised `BilError` (HTTP 405, "no entries found") when
+  every id in a 100-id batch was unknown, contrary to its contract; such a
+  batch is now empty.
+- `list_files()` recovers inventory paths that the server holds with
+  underscores where the inventory has spaces: 36 of the 39 such rows 404'd
+  and all 138 directory names under that project matched after the swap.
+  Everything built on listings (`thumbnail()`, `first_images()`,
+  `terafly_levels()`, `extensions_under()`) benefits; the entries carry
+  the server's real URLs. A random sample of 300 other inventory paths
+  found one stale, so this was the one systematic case.
+- `read_region()` returned an empty array for a rectangle outside the
+  page; it raises `IndexError` naming the page size. A page number past
+  the end (`read_tiff(key=)`, `read_region(page=)`) and a `thumbnail()`
+  `index` past the last slice raise `IndexError` with the count instead of
+  a bare index error from deep inside tifffile.
+- `thumbnail(max_size=0)` divided by zero after downloading the slice;
+  `max_size < 1` and `read_stack(step=0)` are rejected before any request.
+- `thumbnail(channel=...)` with no matching file, and `read_stack()` with a
+  start/stop/step selecting nothing, reported "no slices found"; each now
+  says what was found and what the filter excluded.
+- `BilCatalog.load(date=...)` used the date in a URL and a cache file name
+  without checking it; anything but eight digits is now a `ValueError`.
+- A cache entry missing its `value` key raised `KeyError`; it is dropped.
+- The CLI printed a traceback for every error (unknown id, stale path,
+  unsupported format, bad index); it prints one line and exits 1.
+- `filter(extension="tif")` (no dot) silently matched nothing; the dot is
+  optional now, in the API and the CLI.
+
+Added:
+
+- `preview_plane()`/`thumbnail()` take `max_bytes` (`PREVIEW_MAX_BYTES`,
+  512 MB) and refuse a JPEG 2000 file larger than that: the format cannot
+  be read partially on BIL, and single-file RGB sections cost 320 to
+  666 MB and 25 to 53 s each for a 256-pixel preview. Pass
+  `max_bytes=None` to fetch anyway.
+
+Measured and left alone: the inventory and `/retrieve` disagree on file
+counts for 16 of 40 sampled datasets and on size for some (ace-oat-old is
+0 bytes in the inventory and 3.4 TB in the API), so size filters on the
+inventory can miss datasets; one dataset root listing of 61,000 entries
+takes 77 s from BIL's nginx on every cold call.
+
 ## 0.3.0
 
 - JPEG 2000 (`.jp2`, `.j2k`, `.jpx`) reads in place: `read_jp2()` decodes

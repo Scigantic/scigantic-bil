@@ -149,5 +149,38 @@ def test_landing_zone_paths_are_refused_clearly() -> None:
 
 
 def test_stale_inventory_path_error_names_parent() -> None:
+    # ace-cut-wax: renamed on the server with no space to swap (2026-09-23).
     with pytest.raises(bil.BilNotFoundError, match="list the parent"):
-        bil.list_files("ace-oat-let")  # inventory says 'ventral midbrain', server has 'ventral_midbrain'
+        bil.list_files("ace-cut-wax")
+
+
+def test_stale_space_path_falls_back_to_underscores() -> None:
+    # 36 inventory rows under this project carry "ventral midbrain" with a
+    # space; the server holds them with an underscore (2026-09-23).
+    entries = bil.list_files("ace-oat-pin")
+    assert entries
+    assert all("%20" not in e.url and "/IV77_CA4_SOX9_ventral_midbrain_replicate_2/" in e.url for e in entries)
+    with pytest.raises(bil.BilNotFoundError, match="does not exist"):
+        bil.list_files("https://download.brainimagelibrary.org/07/b0/07b0e46752e129e3/no%20such%20dir/")
+
+
+def test_walk_crawl_has_a_directory_budget() -> None:
+    # 1.8 M files, 232 MB manifest: over MANIFEST_MAX_BYTES, so walk() crawls.
+    seen = 0
+    with pytest.raises(bil.BilError, match="too large to crawl"):
+        for _ in bil.walk("ace-boo-sag", max_dirs=3):
+            seen += 1
+    assert seen >= 0  # entries found before the budget ran out were yielded
+    assert bil.WALK_MAX_DIRS == 512
+
+
+def test_cache_entry_without_value_is_ignored(tmp_path: object) -> None:
+    import json
+
+    from scigantic_bil import cache
+
+    cache.enable_cache(cache_dir=str(tmp_path))
+    cache.put("k", "u", None, 1)
+    file = next(cache.cache_dir().glob("*.json"))
+    file.write_text(json.dumps({"cached_at": 0}))
+    assert cache.get("k", "u", None) is None and not file.exists()

@@ -48,7 +48,7 @@ This package is the other half. It reads BIL in place:
 - **Bounded previews of files of any size.** `preview_plane()` reads the coarsest pyramid level, or every k-th row by offset from an uncompressed plane, or a sample of strips, or a centre region of a tiled page. A 10 GB single-strip MERFISH mosaic previews from 63 MB of reads; `asarray()` would fetch all 10 GB.
 - **fMOST TeraFly trees** (`RES_<x>x<y>x<z>_/` folders, 985 datasets) previewed from the coarsest resolution folder, stitched. The full-resolution folder of one such brain holds 1.6 million files and is never listed.
 - **A seekable HTTP file object** (`HttpFile`) so tifffile fetches only the IFDs, pages, tiles or regions you ask for from a large TIFF, with `read_region()` for a rectangle of a tiled page.
-- **BIL's per-dataset manifest** (path, size, MD5, URL for every file) as one gzipped GET, so a deep tree lists in one request. Guarded by size: a 4.7 million file dataset's manifest is 710 MB gzipped, and `walk()` crawls instead of downloading that.
+- **BIL's per-dataset manifest** (path, size, MD5, URL for every file) as one gzipped GET, so a deep tree lists in one request. Guarded by size: a 4.7 million file dataset's manifest is 710 MB gzipped, and `walk()` crawls instead of downloading that, with a directory budget (`WALK_MAX_DIRS`) so a million-file tree stops with a clear error rather than crawling for an hour.
 
 Measured on 2026-09-08 from a residential connection, against the live archive:
 
@@ -87,7 +87,7 @@ len(cat), cat.date                              # (14224, '20260731')
 cat.summary()                                   # datasets, files, TB, top modality/technique/species/extensions
 cat["ace-cup-eel"]                              # one Dataset by id
 cat.filter(technique="fMOST", species="mouse")  # case-insensitive substring match, any combination
-cat.filter(extension=".swc")                    # datasets shipping neuron reconstructions
+cat.filter(extension=".swc")                    # datasets shipping neuron reconstructions (dot optional)
 cat.filter(max_size_gb=2)                       # small enough to pull whole
 cat.search("iDISCO")                            # BIL's fulltext index, joined to inventory rows
 cat.light_sheet()                               # technique field + fulltext, deduplicated
@@ -109,7 +109,7 @@ d.specimen, d.images                            # specimen record; per-image axe
 d.contributors, d.publications, d.funders
 d.is_light_sheet                                # checks technique, instrument and free text together
 
-bil.retrieve_many(["ace-cup-eel", "ace-bin-run"])   # batched POST, unknown ids dropped
+bil.retrieve_many(["ace-cup-eel", "ace-bin-run"])   # batched POST, unknown ids dropped (an all-unknown batch is empty)
 bil.fulltext("CLARITY")                             # BIL ids only
 bil.query("specimen", species="mouse")              # one structured element=value pair
 ```
@@ -162,7 +162,7 @@ bil.read_jp2(entry, reduce=3)    # 1/8 resolution through Pillow, 8-bit, for the
 bil.read_image(entry)            # read_tiff or read_jp2 by extension; slices()/read_stack() accept both
 ```
 
-`thumbnail()` and `preview_plane()` handle `.jp2` folders: small sections decode fully, large ones at reduced resolution (a 75 MB tracing section previews in about 5 s instead of 10 s of full decode; a 460 MB enhancer section is dominated by its own transfer). Two limits, both checked live: BIL's codestreams do not decode truncated, so the whole file is always fetched, and Pillow's reduced decode does not take 16-bit single-channel files, which fall back to a full decode.
+`thumbnail()` and `preview_plane()` handle `.jp2` folders: small sections decode fully, large ones at reduced resolution (a 75 MB tracing section previews in about 5 s instead of 10 s of full decode; a 460 MB enhancer section is dominated by its own transfer). Two limits, both checked live: BIL's codestreams do not decode truncated, so the whole file is always fetched (a preview refuses files over `PREVIEW_MAX_BYTES`, 512 MB, unless `max_bytes=None`), and Pillow's reduced decode does not take 16-bit single-channel files, which fall back to a full decode.
 
 ### What it does not read
 
