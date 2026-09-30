@@ -93,9 +93,10 @@ def send(
                 # ten-minute one per test. Connection errors, connect
                 # timeouts and 5xx are retried below.
                 raise BilError(
-                    f"{url} sent no data for {timeout:.0f} s. BIL renders large directory "
-                    "listings before responding; try again later, or pass a longer timeout "
-                    "where the call accepts one (list_files, download)."
+                    f"{url} sent no data for {timeout:.0f} s. BIL can take minutes to answer "
+                    "(a large directory listing is rendered in full before the first byte); "
+                    "try again later, or pass a longer timeout where the call accepts one "
+                    "(list_files, download)."
                 ) from exc
             last_error = exc
             if attempt == _MAX_RETRIES:
