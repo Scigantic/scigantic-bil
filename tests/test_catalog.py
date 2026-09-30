@@ -64,7 +64,14 @@ def test_search_joins_fulltext_hits_to_inventory_rows(catalog: bil.BilCatalog) -
 def test_summary_shape(catalog: bil.BilCatalog) -> None:
     s = catalog.summary()
     assert s["datasets"] == len(catalog)
-    assert s["terabytes"] > 5_000
+    # The inventory's size column is blank for hundreds of rows on some days
+    # (492 of 14,233 on 2026-09-24, 208 on 2026-09-27), which moved the total
+    # from 6,007 to 4,577 TB between snapshots and failed a fixed "> 5,000"
+    # here. Check the arithmetic and the order of magnitude instead.
+    sized = [d.size_bytes for d in catalog if d.size_bytes]
+    assert s["terabytes"] == round(sum(sized) / 1e12, 1)
+    assert s["terabytes"] > 1_000
+    assert s["datasets_without_size"] == len(catalog) - len(sized)
     assert "fMOST" in s["technique"] and "STPT" in s["technique"]
     assert ".tif" in s["extensions"] and ".jp2" in s["extensions"]
 
@@ -104,6 +111,13 @@ def test_concurrent_cold_loads_do_not_race(tmp_path: object) -> None:
         assert not list((Path(str(tmp_path)) / "race").glob("*.part"))
     finally:
         bil.enable_cache(cache_dir=str(Path(str(tmp_path)).parent / "bil-cache0"))
+
+
+def test_from_row_tolerates_a_short_row() -> None:
+    # csv.DictReader fills missing trailing columns with None, not "".
+    d = bil.Dataset.from_row({"bildid": " abc-def ", "size": None, "frequencies": None})
+    assert d.bildid == "abc-def" and d.size_bytes is None and d.extensions == {}
+    assert d.contributor == "" and d.url == "https://download.brainimagelibrary.org/"
 
 
 def test_load_rejects_a_date_that_is_not_eight_digits() -> None:

@@ -16,6 +16,7 @@ from .api import fulltext, query, retrieve, retrieve_many
 from .cache import cache_dir, clear as clear_cache, disable_cache, enable_cache, is_cache_enabled
 from .catalog import BilCatalog, available_inventory_dates
 from .files import (
+    LISTING_TIMEOUT,
     MANIFEST_MAX_BYTES,
     WALK_MAX_DIRS,
     ManifestTooLargeError,

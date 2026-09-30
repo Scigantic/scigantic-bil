@@ -108,6 +108,48 @@ def test_send_retries_transient_5xx(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resp.status_code == 200 and len(calls) == 3
 
 
+def test_send_does_not_retry_a_read_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A read timeout means the server is still rendering the response; the
+    # same request again is no faster. Five attempts at 120 s each made one
+    # slow 44,000-entry listing a ten-minute failure in CI (2026-09-26).
+    import requests
+
+    from scigantic_bil import _client
+
+    calls: list[int] = []
+
+    class Session:
+        headers: dict[str, str] = {}
+
+        def request(self, *a: object, **k: object) -> object:
+            calls.append(1)
+            raise requests.ReadTimeout("read timed out")
+
+    def no_sleep(seconds: float) -> None:
+        raise AssertionError("backed off before a retry")
+
+    monkeypatch.setattr(_client, "_session", Session())
+    monkeypatch.setattr(_client.time, "sleep", no_sleep)
+    with pytest.raises(bil.BilError, match="sent no data for 7 s") as info:
+        _client.send("GET", "https://x/", timeout=7.0)
+    assert len(calls) == 1 and not isinstance(info.value, bil.BilNotFoundError)
+
+    # The same stall mid-body arrives as a ConnectionError wrapping urllib3's
+    # ReadTimeoutError; it is not retried either.
+    from urllib3.exceptions import ReadTimeoutError
+
+    class MidBodySession(Session):
+        def request(self, *a: object, **k: object) -> object:
+            calls.append(1)
+            raise requests.ConnectionError(ReadTimeoutError(None, "https://x/", "Read timed out."))
+
+    del calls[:]
+    monkeypatch.setattr(_client, "_session", MidBodySession())
+    with pytest.raises(bil.BilError, match="sent no data"):
+        _client.send("GET", "https://x/", timeout=7.0)
+    assert len(calls) == 1
+
+
 def test_retrieve_many_thousand_ids(catalog: bil.BilCatalog) -> None:
     import random
 

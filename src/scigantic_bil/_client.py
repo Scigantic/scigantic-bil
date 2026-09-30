@@ -4,8 +4,10 @@ backoff on transient failures, and the two BIL hosts this package talks to.
 BIL has no documented rate limit and no throttling header (checked live
 2026-09-08: responses carry only nginx defaults), so unlike
 scigantic-pubchem there is no token bucket here. Retries cover 429/5xx and
-connection errors only; a 404 is a real answer (a path that does not exist)
-and is raised as BilNotFoundError immediately.
+connection errors only. A 404 is a real answer (a path that does not exist)
+and is raised as BilNotFoundError immediately; so is a read timeout, which
+means the server is still building the response and would be no faster the
+second time.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import time
 from typing import Any
 
 import requests
+from urllib3.exceptions import ReadTimeoutError
 
 from ._version import __version__
 
@@ -38,6 +41,17 @@ class BilError(Exception):
 class BilNotFoundError(BilError):
     """Raised for a 404: a dataset id, directory or file that does not
     exist. A real outcome, not a transient failure, so never retried."""
+
+
+def _is_read_timeout(exc: requests.RequestException) -> bool:
+    """True for a stall waiting on the server, in either form requests
+    raises it: ReadTimeout while waiting for the headers, or a
+    ConnectionError wrapping urllib3's ReadTimeoutError mid-body."""
+    if isinstance(exc, requests.ReadTimeout):
+        return True
+    return isinstance(exc, requests.ConnectionError) and any(
+        isinstance(arg, ReadTimeoutError) for arg in exc.args
+    )
 
 
 def get_session() -> requests.Session:
@@ -68,6 +82,21 @@ def send(
                 method, url, params=params, headers=headers, stream=stream, timeout=timeout
             )
         except requests.RequestException as exc:
+            if _is_read_timeout(exc):
+                # The server took the request and then sent nothing for the
+                # whole timeout. That is not a flaky connection, it is BIL's
+                # nginx still building the response: a directory listing is
+                # rendered in full before the first byte, and a 44,000-entry
+                # directory on a slow day takes longer than any timeout
+                # worth setting. Retrying asks for the same walk again; in
+                # CI on 2026-09-26 that turned one 120 s stall into a
+                # ten-minute one per test. Connection errors, connect
+                # timeouts and 5xx are retried below.
+                raise BilError(
+                    f"{url} sent no data for {timeout:.0f} s. BIL renders large directory "
+                    "listings before responding; try again later, or pass a longer timeout "
+                    "where the call accepts one (list_files, download)."
+                ) from exc
             last_error = exc
             if attempt == _MAX_RETRIES:
                 break

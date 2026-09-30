@@ -93,9 +93,16 @@ def test_paths_with_hash_space_and_unicode_are_encoded() -> None:
     assert url.endswith("/Virus_tracing-B1-%236/")
     assert bil.encode_url(url) == url  # idempotent
     assert bil.encode_path("S100β_staining") == "S100%CE%B2_staining"
-    entries = bil.list_files("ace-act-cow")
-    assert len(entries) == 44744
-    assert entries[0].name.startswith("SC_SLICE") and "%23" in entries[0].url
+    # ace-act-cow's bildirectory is that path; resolving it through the
+    # metadata record must encode the '#' too.
+    assert bil.resolve_url("ace-act-cow") == url
+    # The server's own href for it, read from the parent (6 entries, 809
+    # bytes). Listing the directory itself is 44,744 rows and 5.3 MB, which
+    # BIL's nginx took 120 s to render on 2026-09-30 and timed out in CI on
+    # 2026-09-26; the parent proves the same encoding round-trip.
+    parent = bil.list_files(url.rsplit("/", 2)[0] + "/")
+    hashed = [e for e in parent if e.name == "Virus_tracing-B1-#6"]
+    assert len(hashed) == 1 and hashed[0].is_dir and hashed[0].url == url
 
 
 def test_listing_names_are_decoded_urls_stay_encoded() -> None:
@@ -129,12 +136,27 @@ def test_manifest_size_guard() -> None:
     assert bil.manifest_size("zzz-zzz-zzz") is None
 
 
-def test_find_zarr_is_bounded_on_huge_trees() -> None:
-    import time
+def test_find_zarr_is_bounded_on_huge_trees(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1.6 M-file TeraFly tree, manifest too large: find_zarr() must crawl at
+    # most max_dirs listings. Counted, not timed: a wall-clock bound here
+    # measured BIL's speed of the day, not the budget.
+    from scigantic_bil import files
 
-    t0 = time.time()
-    assert bil.find_zarr("ace-cap-cop") == []  # 1.6 M-file TeraFly tree, manifest too large
-    assert time.time() - t0 < 60
+    listed: list[str] = []
+    real = files.send
+
+    def spy(method: str, url: str, **kw: object) -> object:
+        if method == "GET":
+            listed.append(url)
+        return real(method, url, **kw)  # type: ignore[arg-type]
+
+    bil.disable_cache()
+    try:
+        monkeypatch.setattr(files, "send", spy)
+        assert bil.find_zarr("ace-cap-cop", max_dirs=8) == []
+    finally:
+        bil.enable_cache()
+    assert 0 < len(listed) <= 8
 
 
 def test_first_images_bounded_descent() -> None:

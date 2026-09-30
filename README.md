@@ -84,7 +84,7 @@ cat = bil.BilCatalog.load()                     # newest daily inventory
 cat = bil.BilCatalog.load(date="20260731")      # a specific snapshot
 len(cat), cat.date                              # (14224, '20260731')
 
-cat.summary()                                   # datasets, files, TB, top modality/technique/species/extensions
+cat.summary()                                   # datasets, files, TB, rows without a size, top modality/technique/species/extensions
 cat["ace-cup-eel"]                              # one Dataset by id
 cat.filter(technique="fMOST", species="mouse")  # case-insensitive substring match, any combination
 cat.filter(extension=".swc")                    # datasets shipping neuron reconstructions (dot optional)
@@ -128,6 +128,8 @@ bil.download(entry, "out/")              # the one function that writes image by
 ```
 
 Any of these accept a BIL id, a `Dataset`, a `/bil/data/...` path from the metadata, or a download-server URL. Paths are percent-encoded for you: 39 inventory paths carry spaces, `#` or non-ASCII characters, and an unencoded `#` is a URL fragment. Two things the inventory gets wrong are reported rather than hidden: a directory renamed on the server since the inventory was built (the error names the parent to list) and a dataset still under BIL's landing zone, which is not public.
+
+BIL's nginx renders a directory listing in full before sending the first byte, so a directory of tens of thousands of entries can take minutes (44,744 entries: 120 s). `list_files()` waits `LISTING_TIMEOUT` (300 s) and raises `BilError` once if the server stays silent that long; a read timeout is never retried, because the second attempt is no faster than the first. Connection errors and 5xx responses are retried with backoff.
 
 ## Images
 
@@ -203,7 +205,7 @@ $ scigantic-bil thumbnail ace-bin-run slice.png --size 512
 
 ## Testing
 
-Every test runs live against BIL, no mocks, the same philosophy as the rest of the scigantic-* packages. The suite takes two to five minutes depending on the server and includes the stress cases above: the 21 GB OME-TIFF, the 10 GB plane, the `#` path, the 4.7 million file manifest guard, the TeraFly tree, the Pillow fallback, six threads loading the catalog cold. CI runs Python 3.10 through 3.14 plus `mypy --strict`.
+Every test runs live against BIL, no mocks, the same philosophy as the rest of the scigantic-* packages. The suite takes two to five minutes on a good day and longer when BIL is slow, and includes the stress cases above: the 21 GB OME-TIFF, the 10 GB plane, the `#` path, the 4.7 million file manifest guard, the TeraFly tree, the Pillow fallback, six threads loading the catalog cold. Bounds are on requests and bytes, not seconds, so a slow server fails nothing that a fast one would pass. CI runs Python 3.10 through 3.14 plus `mypy --strict`.
 
 ## License
 

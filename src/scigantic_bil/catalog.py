@@ -205,7 +205,11 @@ class BilCatalog:
 
     def summary(self) -> dict[str, Any]:
         """Counts and totals for a quick orientation: datasets, files, TB,
-        and the top values of modality, technique, species, consortium."""
+        and the top values of modality, technique, species, consortium.
+        ``datasets_without_size`` counts rows whose inventory size is blank
+        or zero; they are left out of ``terabytes``, and there are hundreds
+        of them on some days (492 of 14,233 on 2026-09-24, 208 three days
+        later), which moves the total by more than a petabyte."""
         sizes = [d.size_bytes for d in self.datasets if d.size_bytes]
         files = [d.number_of_files for d in self.datasets if d.number_of_files]
 
@@ -218,6 +222,7 @@ class BilCatalog:
             "datasets": len(self.datasets),
             "files": sum(files),
             "terabytes": round(sum(sizes) / 1e12, 1),
+            "datasets_without_size": len(self.datasets) - len(sizes),
             "modality": top(d.generalmodality for d in self.datasets),
             "technique": top(d.technique for d in self.datasets),
             "species": top(d.species.lower() for d in self.datasets),

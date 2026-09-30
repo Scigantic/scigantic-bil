@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.4.1
+
+The 2026-09-26 CI run failed on two tests. One found a real defect in
+how timeouts were retried; the other asserted a fixed total on a number
+the Brain Image Library does not keep stable between inventory snapshots.
+
+Fixed:
+
+- A read timeout was retried four times with the same timeout, so a
+  directory BIL's nginx could not render within 120 s (a 44,744-entry one
+  took 120 s for 5.3 MB on 2026-09-30) cost ten minutes per call before
+  failing. `send()` now raises `BilError` on the first read timeout, with
+  the timeout in the message: the server is still building the response,
+  and asking again is no faster. Connection errors, 429 and 5xx are still
+  retried.
+- `list_files()` waits `LISTING_TIMEOUT` (300 s, was 120 s) for a listing
+  and takes a `timeout` argument; `download()` takes one too.
+- `BilCatalog.summary()` reports `datasets_without_size`: the inventory's
+  size column is blank or zero for hundreds of rows on some days (492 of
+  14,233 on 2026-09-24, 208 on 2026-09-27), which moved the archive total
+  between 4,577 and 6,007 TB across three days and is why a fixed
+  threshold on it failed.
+- `Dataset.from_row()` no longer raises on a short inventory row
+  (`csv.DictReader` fills missing columns with None).
+
+Tests: the encoding test reads the 6-entry parent of the `#` directory
+instead of the directory itself; the crawl-budget and preview-size tests
+count requests and bytes instead of seconds. CI runs all five Python legs
+to completion (`fail-fast: false`), caps each at 45 minutes, prints the 15
+slowest tests, and publishes with `--skip-existing`.
+
 ## 0.4.0
 
 Fixes from a second run against the live archive on 2026-09-23 (stratified

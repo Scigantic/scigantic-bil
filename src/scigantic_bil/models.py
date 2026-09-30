@@ -111,27 +111,32 @@ class Dataset:
     metadata_version: str = ""
 
     @classmethod
-    def from_row(cls, row: dict[str, str]) -> Dataset:
+    def from_row(cls, row: dict[str, str | None]) -> Dataset:
+        # csv.DictReader fills a short row's missing columns with None, not
+        # ""; treat both as blank rather than failing on the one row.
+        def text(key: str) -> str:
+            return (row.get(key) or "").strip()
+
         return cls(
-            bildid=row.get("bildid", "").strip(),
-            bildate=row.get("bildate", "").strip(),
-            contributor=row.get("contributor", "").strip(),
-            affiliation=row.get("affiliation", "").strip(),
-            award_number=row.get("award_number", "").strip(),
-            project=row.get("project", "").strip(),
-            consortium=row.get("consortium", "").strip(),
-            bildirectory=row.get("bildirectory", "").strip(),
-            generalmodality=row.get("generalmodality", "").strip(),
-            technique=row.get("technique", "").strip(),
-            species=row.get("species", "").strip(),
-            taxonomy=row.get("taxonomy", "").strip(),
-            genotype=row.get("genotype", "").strip(),
-            samplelocalid=row.get("samplelocalid", "").strip(),
-            number_of_files=_int_or_none(row.get("number_of_files", "")),
-            size_bytes=_int_or_none(row.get("size", "")),
-            file_types=_dict_or_empty(row.get("file_types", "")),
-            extensions=_dict_or_empty(row.get("frequencies", "")),
-            metadata_version=row.get("metadata_version", "").strip(),
+            bildid=text("bildid"),
+            bildate=text("bildate"),
+            contributor=text("contributor"),
+            affiliation=text("affiliation"),
+            award_number=text("award_number"),
+            project=text("project"),
+            consortium=text("consortium"),
+            bildirectory=text("bildirectory"),
+            generalmodality=text("generalmodality"),
+            technique=text("technique"),
+            species=text("species"),
+            taxonomy=text("taxonomy"),
+            genotype=text("genotype"),
+            samplelocalid=text("samplelocalid"),
+            number_of_files=_int_or_none(text("number_of_files")),
+            size_bytes=_int_or_none(text("size")),
+            file_types=_dict_or_empty(text("file_types")),
+            extensions=_dict_or_empty(text("frequencies")),
+            metadata_version=text("metadata_version"),
         )
 
     @property

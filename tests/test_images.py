@@ -130,16 +130,34 @@ def test_tiff_info_and_region_on_21gb_ome_tiff() -> None:
     assert region.shape == (512, 512) and region.dtype == np.uint16
 
 
-def test_preview_plane_bounds_reads_on_a_10gb_plane() -> None:
-    import time
+def _count_bytes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Bytes of every non-streaming response images.py fetches, so a test
+    can bound what a preview read rather than how long BIL took today."""
+    from scigantic_bil import images
 
+    fetched: list[int] = []
+    real = images.send
+
+    def spy(method: str, url: str, **kw: object) -> object:
+        resp = real(method, url, **kw)  # type: ignore[arg-type]
+        if method == "GET" and not kw.get("stream"):
+            fetched.append(len(resp.content))
+        return resp
+
+    monkeypatch.setattr(images, "send", spy)
+    return fetched
+
+
+def test_preview_plane_bounds_reads_on_a_10gb_plane(monkeypatch: pytest.MonkeyPatch) -> None:
     entries = bil.first_images("ace-dud-vow")
     entry = next(e for e in entries if e.name == "mosaic_DAPI_z3.tif")
     assert entry.size and entry.size > 10_000_000_000
-    t0 = time.time()
+    fetched = _count_bytes(monkeypatch)
     th = bil.preview_plane(entry, max_size=128)
     assert th.ndim == 2 and max(th.shape) <= 128 and th.max() > 0
-    assert time.time() - t0 < 120
+    # 128 rows of 124 KB each plus the IFD walk: about 16 MB, against 10 GB
+    # for asarray(). 63 MB was the 512-row figure.
+    assert 0 < sum(fetched) < 100_000_000
 
 
 def test_preview_plane_strip_sampling_keeps_width() -> None:
@@ -186,14 +204,15 @@ def test_read_jp2_reduced_resolution_rgb_section() -> None:
     assert a.ndim == 3 and a.shape[-1] == 3 and a.shape[0] == 12000 // 8 and a.shape[1] == 16000 // 8
 
 
-def test_jp2_thumbnails_across_producers() -> None:
-    import time
-
+def test_jp2_thumbnails_across_producers(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetched = _count_bytes(monkeypatch)
     for bildid, ndim in (("ace-bit-wig", 2), ("ace-zip-hen", 3)):
-        t0 = time.time()
+        del fetched[:]
         th = bil.thumbnail(bildid, max_size=256)
         assert th.ndim == ndim and max(th.shape[:2]) <= 256 and th.max() > 0
-        assert time.time() - t0 < 120
+        # JPEG 2000 cannot be read partially, so a preview is exactly one
+        # whole section, under PREVIEW_MAX_BYTES, and nothing else.
+        assert len(fetched) == 1 and 0 < fetched[0] <= bil.PREVIEW_MAX_BYTES
 
 
 def test_out_of_range_page_index_and_region_raise_index_error() -> None:

@@ -40,6 +40,13 @@ _TERAFLY_RE = re.compile(r"^RES_\d+x\d+x\d+_?$", re.IGNORECASE)
 MANIFEST_MAX_BYTES = 64 << 20
 _MANIFEST_DISK_CACHE_MAX = 8 << 20
 
+# How long list_files() waits for nginx to render one directory. The
+# listing is built in full before the first byte, so this is bounded by the
+# largest directory, not the network: a 61,000-entry dataset root took 77 s
+# on 2026-09-23 and a 44,000-entry one exceeded 120 s on 2026-09-26. A
+# timeout is raised once, not retried (see _client.send).
+LISTING_TIMEOUT = 300.0
+
 
 class ManifestTooLargeError(BilError):
     """The dataset's manifest exceeds the size limit passed to manifest()."""
@@ -165,8 +172,12 @@ def manifest(
     return [FileEntry(**row) for row in cached]
 
 
-def list_files(target: str | Dataset | DatasetDetail) -> list[FileEntry]:
-    """Entries of one directory (not recursive). Cached.
+def list_files(
+    target: str | Dataset | DatasetDetail, timeout: float = LISTING_TIMEOUT
+) -> list[FileEntry]:
+    """Entries of one directory (not recursive). Cached. ``timeout`` is
+    how long to wait for the server to render the listing (LISTING_TIMEOUT,
+    300 s); a directory of tens of thousands of entries can need it.
 
     A 404 on a dataset's own directory usually means BIL's inventory path
     is stale. The one systematic case is a directory name with spaces
@@ -180,14 +191,14 @@ def list_files(target: str | Dataset | DatasetDetail) -> list[FileEntry]:
     cached = cache.get("listing", url)
     if cached is None:
         try:
-            resp = send("GET", url, timeout=120.0)
+            resp = send("GET", url, timeout=timeout)
             listing_url = url
         except BilNotFoundError as exc:
             alt = _underscore_variant(url)
             if alt is None:
                 raise _stale_path_error(url) from exc
             try:
-                resp = send("GET", alt, timeout=120.0)
+                resp = send("GET", alt, timeout=timeout)
             except BilNotFoundError:
                 raise _stale_path_error(url) from exc
             listing_url = alt
@@ -429,16 +440,17 @@ def find_zarr(
     return sorted(out)
 
 
-def download(entry: FileEntry | str, dest: str | Path) -> Path:
+def download(entry: FileEntry | str, dest: str | Path, timeout: float = 600.0) -> Path:
     """Stream one file to ``dest`` (a path or a directory). Returns the
     written path. This is the only function in the package that writes
-    image bytes to disk."""
+    image bytes to disk. ``timeout`` is the longest silence tolerated on
+    the connection, not a cap on the whole transfer."""
     url = entry.url if isinstance(entry, FileEntry) else entry
     name = entry.name if isinstance(entry, FileEntry) else url.rstrip("/").rsplit("/", 1)[-1]
     dest = Path(dest)
     path = dest / name if dest.is_dir() else dest
     path.parent.mkdir(parents=True, exist_ok=True)
-    resp = send("GET", url, stream=True, timeout=600.0)
+    resp = send("GET", url, stream=True, timeout=timeout)
     tmp = path.with_suffix(path.suffix + ".part")
     with open(tmp, "wb") as fh:
         shutil.copyfileobj(resp.raw, fh, length=1 << 20)
