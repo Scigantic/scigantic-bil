@@ -8,11 +8,22 @@ HTTP without downloading them.
     d = bil.retrieve(ls[0].bildid)       # full record: abstract, instrument, rights
     files = bil.slices(d)                # z-slice TIFFs, in order, nothing fetched
     img = bil.thumbnail(d)               # one middle slice, downsampled
+    views = bil.brainpi_views(d)         # BIL's OME-Zarr / Neuroglancer views, if listed
 """
 
 from ._client import BilError, BilNotFoundError
 from ._version import __version__
 from .api import fulltext, query, retrieve, retrieve_many
+from .brainpi import (
+    BRAINPI_BASE,
+    VIEWS_DEFAULT_LIMIT,
+    BrainpiViews,
+    brainpi_links,
+    brainpi_paths,
+    brainpi_views,
+    disk_path,
+    first_omezarr,
+)
 from .cache import cache_dir, clear as clear_cache, disable_cache, enable_cache, is_cache_enabled
 from .catalog import BilCatalog, available_inventory_dates
 from .files import (
@@ -71,6 +82,15 @@ __all__ = [
     "ManifestTooLargeError",
     "MANIFEST_MAX_BYTES",
     "WALK_MAX_DIRS",
+    "LISTING_TIMEOUT",
+    "BRAINPI_BASE",
+    "VIEWS_DEFAULT_LIMIT",
+    "BrainpiViews",
+    "brainpi_links",
+    "brainpi_paths",
+    "brainpi_views",
+    "disk_path",
+    "first_omezarr",
     "PREVIEW_MAX_BYTES",
     "BilCatalog",
     "available_inventory_dates",

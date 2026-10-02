@@ -48,6 +48,7 @@ This package is the other half. It reads BIL in place:
 - **Bounded previews of files of any size.** `preview_plane()` reads the coarsest pyramid level, or every k-th row by offset from an uncompressed plane, or a sample of strips, or a centre region of a tiled page. A 10 GB single-strip MERFISH mosaic previews from 63 MB of reads; `asarray()` would fetch all 10 GB.
 - **fMOST TeraFly trees** (`RES_<x>x<y>x<z>_/` folders, 985 datasets) previewed from the coarsest resolution folder, stitched. The full-resolution folder of one such brain holds 1.6 million files and is never listed.
 - **A seekable HTTP file object** (`HttpFile`) so tifffile fetches only the IFDs, pages, tiles or regions you ask for from a large TIFF, with `read_region()` for a rectangle of a tiled page.
+- **BIL's BrAinPI views**: the OME-Zarr and Neuroglancer URLs BIL serves on the fly for Imaris, `.omehans`, TeraFly and OME-Zarr files, from the metadata record, with `thumbnail()` and `open_zarr()` falling back to them for datasets this package cannot otherwise read.
 - **BIL's per-dataset manifest** (path, size, MD5, URL for every file) as one gzipped GET, so a deep tree lists in one request. Guarded by size: a 4.7 million file dataset's manifest is 710 MB gzipped, and `walk()` crawls instead of downloading that, with a directory budget (`WALK_MAX_DIRS`) so a million-file tree stops with a clear error rather than crawling for an hour.
 
 Measured on 2026-09-08 from a residential connection, against the live archive:
@@ -168,7 +169,7 @@ bil.read_image(entry)            # read_tiff or read_jp2 by extension; slices()/
 
 ### What it does not read
 
-Formats this package does not decode raise `UnsupportedFormatError` naming what does: Imaris `.ims` (HDF5, h5py), NIfTI (nibabel), MERFISH `.dax` frames (raw uint16, numpy), SWC morphologies (navis), and tables (pandas).
+Formats this package does not decode raise `UnsupportedFormatError` naming what does: Imaris `.ims` (HDF5, h5py, or a BrAinPI view when BIL lists one), NIfTI (nibabel), MERFISH `.dax` frames (raw uint16, numpy), SWC morphologies (navis), and tables (pandas).
 
 ### OME-Zarr
 
@@ -180,6 +181,27 @@ bil.zarr_thumbnail(g, max_size=512)
 ```
 
 A zarr store is a directory, so it never shows in the inventory's extension histogram; `find_zarr()` is how to know a dataset ships one. Requires `pip install "scigantic-bil[zarr]"` (zarr 3, fsspec, aiohttp) and Python 3.11 or newer, which is zarr 3's own floor; on 3.10 the extra installs nothing and `open_zarr()` raises a clear ImportError.
+
+## BrAinPI views: OME-Zarr and Neuroglancer on the fly
+
+BIL runs [BrAinPI](https://github.com/CBI-PITT/BrAinPI), which serves Imaris `.ims`, `.omehans`, TeraFly and OME-Zarr files as OME-Zarr pyramids, Neuroglancer precomputed and OpenSeadragon tiles without converting anything on disk. Which files are eligible is in each metadata record (`DatasetDetail.brainpidata`); 28 percent of datasets have entries, mostly Imaris.
+
+```python
+d = bil.retrieve("ace-bet-fox")
+d.has_brainpi, d.brainpidata               # True, ('0539046893.omehans',)
+views = bil.brainpi_views(d)               # one BrainpiViews per listed file, first 32 by default
+views[0].omezarr                           # https://brainapi.brainimagelibrary.org/omezarr/....omehans.ome.zarr
+views[0].neuroglancer                      # precomputed source: open as precomputed://<url> in Neuroglancer
+g = bil.open_zarr(views[0].omezarr)        # 13 levels, (1, 3, 140, 12000, 16000) uint16
+bil.brainpi_links(entry)                   # ask about any file or store; every field None when not served
+bil.thumbnail("ace-can-elk")               # Imaris-only dataset: previews from the BrAinPI pyramid
+```
+
+`open_zarr()` and `thumbnail()` use the first BrAinPI view when a dataset has nothing on the download server this package reads itself. The view URLs come from the service, never from string assembly: `/bil/data/...` is served under a `bil_data/` prefix while `/bil/assets/...` is not. The listed files are BIL's curation, not the service's limit: BrAinPI also serves a single TIFF (a 2-D pyramid of that slice) and an existing OME-Zarr store whether or not BIL lists them, and nothing for a directory of slices, so `brainpi_links()` asks about the exact path. JPEG 2000 views did not answer within seven minutes when checked; the link is returned, opening it is up to you.
+
+```console
+$ scigantic-bil views ace-bet-fox
+```
 
 ## Caching
 
@@ -201,6 +223,7 @@ $ scigantic-bil filter --technique fMOST --species mouse --max-gb 100
 $ scigantic-bil info ace-cup-eel
 $ scigantic-bil files ace-bin-run --zarr
 $ scigantic-bil thumbnail ace-bin-run slice.png --size 512
+$ scigantic-bil views ace-bet-fox
 ```
 
 ## Testing
