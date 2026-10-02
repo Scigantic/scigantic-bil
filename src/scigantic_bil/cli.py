@@ -1,5 +1,5 @@
 """Command-line interface: ``scigantic-bil summary | search | light-sheet |
-filter | info | files | thumbnail``. Every command has a Python twin."""
+filter | info | files | thumbnail | views``. Every command has a Python twin."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Sequence
 
 from ._client import BilError
 from .api import retrieve
+from .brainpi import BrainpiViews, brainpi_links, brainpi_views
 from .catalog import BilCatalog
 from .files import find_zarr, list_files, walk
 from .images import thumbnail
@@ -127,6 +128,33 @@ def _cmd_thumbnail(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_views(args: argparse.Namespace) -> int:
+    target = args.target
+    if target.startswith("/bil/") or target.startswith("http"):
+        views: list[BrainpiViews] = [brainpi_links(target)]
+    else:
+        views = brainpi_views(target, limit=None if args.limit == 0 else args.limit)
+        if not views:
+            print(f"BIL lists no BrAinPI files for {target}", file=sys.stderr)
+    if args.json:
+        print(json.dumps([dataclasses.asdict(v) for v in views], indent=2))
+        return 0
+    for v in views:
+        print(v.path)
+        if not v.available:
+            print("  not served by BrAinPI")
+            continue
+        for label, url in (
+            ("neuroglancer", v.neuroglancer),
+            ("ome-zarr", v.omezarr),
+            ("ome-zarr 8-bit", v.omezarr_8bit),
+            ("openseadragon", v.openseadragon),
+        ):
+            if url:
+                print(f"  {label:<15} {url}")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="scigantic-bil", description="Brain Image Library from the command line")
     p.add_argument("--date", default=None, help="inventory date YYYYMMDD (default: newest)")
@@ -174,6 +202,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     s.add_argument("--index", type=int, default=None)
     s.add_argument("--channel", default=None)
     s.set_defaults(func=_cmd_thumbnail)
+
+    s = sub.add_parser("views", help="BrAinPI OME-Zarr and Neuroglancer views for a dataset or file")
+    s.add_argument("target", help="BIL id, /bil/... disk path, or download-server URL")
+    s.add_argument("--limit", type=int, default=32, help="files to ask about for a dataset (0 for all)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=_cmd_views)
 
     args = p.parse_args(argv)
     try:

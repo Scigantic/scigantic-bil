@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0
+
+Added, at the suggestion of a BIL maintainer: BIL's BrAinPI service
+(`brainapi.brainimagelibrary.org`), which serves Imaris, `.omehans`,
+TeraFly and OME-Zarr files as OME-Zarr pyramids and Neuroglancer
+precomputed on the fly.
+
+- `DatasetDetail.brainpiroot` / `.brainpidata` / `.has_brainpi`: BIL's
+  list of files it serves this way (28 percent of datasets in a 1,500
+  dataset sample; mostly Imaris).
+- `brainpi_links(path)`: every view BrAinPI offers for one file or store,
+  from the service's own answer. The URLs are not a prefix of the disk
+  path (`/bil/data/` becomes `bil_data/`), so they are never assembled
+  here. `brainpi_views(dataset)`, `brainpi_paths(detail)`,
+  `first_omezarr(dataset)`, `disk_path(url)`.
+- `open_zarr()` and `thumbnail()` fall back to the first BrAinPI OME-Zarr
+  view when a dataset has no TIFF, JPEG 2000 or zarr on the download
+  server. An Imaris-only MORF dataset previews from a few chunks of the
+  coarsest level instead of "download it and open with h5py".
+- `zarr_levels()` no longer fails on a store with no directory listing
+  (a BrAinPI view); it probes the declared levels instead.
+- CLI: `scigantic-bil views <id | /bil/path | url>`.
+
+Measured 2026-10-02: a 3-channel 12000 x 16000 x 140 `.omehans` opens as
+13 levels in 20 s, a 64 x 64 read takes 0.3 s; an `.ims` opens in 2.6 s.
+A `.jp2` view answered neither in 120 s nor 410 s, so JPEG 2000 views are
+returned as links but never opened automatically.
+
 ## 0.4.1
 
 The 2026-09-26 CI run failed on two tests. One found a real defect in

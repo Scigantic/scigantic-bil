@@ -213,10 +213,21 @@ class DatasetDetail:
     images: tuple[dict[str, str], ...]
     submission: dict[str, str]
     raw: dict[str, Any] = field(repr=False, compare=False)
+    # BIL's curated list of files BrAinPI serves as OME-Zarr and
+    # Neuroglancer views (``Assets.brainpiroot`` / ``Assets.brainpidata``);
+    # see brainpi.py. Empty for most datasets.
+    brainpiroot: str = ""
+    brainpidata: tuple[str, ...] = ()
 
     @property
     def url(self) -> str:
         return dataset_url(self.bildirectory)
+
+    @property
+    def has_brainpi(self) -> bool:
+        """True when BIL lists at least one file of this dataset for
+        BrAinPI; brainpi.brainpi_views() fetches the links."""
+        return bool(self.brainpiroot and self.brainpidata)
 
     @property
     def microscope_type(self) -> str:
@@ -297,6 +308,10 @@ class DatasetDetail:
             images=tuple({str(k): str(v) for k, v in i.items()} for i in all_of("Image")),
             submission=submission,
             raw=entry,
+            brainpiroot=str(assets.get("brainpiroot") or ""),
+            brainpidata=tuple(
+                str(f) for f in (assets.get("brainpidata") or []) if isinstance(f, str) and f
+            ),
         )
 
 

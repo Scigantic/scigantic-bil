@@ -624,10 +624,16 @@ def thumbnail(
         # One file per z-plane: preview the chosen slice. One multi-page or
         # giant file: preview_plane picks a middle page and bounds the read.
         return preview_plane(stack[i], max_size=max_size, max_bytes=max_bytes)
+    # Nothing this package decodes itself. BIL may still serve the dataset
+    # as an OME-Zarr pyramid through BrAinPI (Imaris, .omehans, TeraFly in
+    # BIL's curated list); the coarsest level of that is a few chunks.
+    view = _brainpi_omezarr(target)
+    if view:
+        return zarr_thumbnail(view, max_size=max_size, index=index)
     exts = extensions_under(target)
     raise UnsupportedFormatError(
-        f"no TIFF or JPEG 2000 slices, zarr store or TeraFly tree under {resolve_url(target)}; "
-        f"found extensions {exts}. " + _format_hint(exts)
+        f"no TIFF or JPEG 2000 slices, zarr store, TeraFly tree or BrAinPI view under "
+        f"{resolve_url(target)}; found extensions {exts}. " + _format_hint(exts)
     )
 
 
@@ -637,7 +643,7 @@ def _format_hint(exts: list[str]) -> str:
         ".nii": "NIfTI volumes: nibabel.load() after bil.download().",
         ".nii.gz": "NIfTI volumes: nibabel.load() after bil.download().",
         ".h5": "HDF5: h5py after bil.download(), or h5py with fsspec's HTTPFileSystem.",
-        ".ims": "Imaris .ims is HDF5: h5py after bil.download().",
+        ".ims": "Imaris .ims is HDF5: h5py after bil.download(); BIL serves some as OME-Zarr through BrAinPI, see brainpi_views().",
         ".dax": "MERFISH raw .dax frames: uint16 binary, shape in the sibling .inf file; np.memmap after bil.download().",
         ".h5ad": "AnnData tables: anndata.read_h5ad() after bil.download().",
         ".csv": "Tables, not images: pandas.read_csv(url) works directly.",
@@ -751,10 +757,12 @@ def _squeeze_2d(array: np.ndarray) -> np.ndarray:
 
 
 def open_zarr(target: str | Dataset | DatasetDetail) -> "zarr.Group | zarr.Array[Any]":
-    """Open an OME-Zarr store on the download server lazily. ``target`` may
-    be the store URL itself or a dataset, in which case the first
-    ``*.zarr`` directory found is opened. Nothing is read until you slice
-    an array. Requires ``pip install scigantic-bil[zarr]``."""
+    """Open an OME-Zarr store lazily. ``target`` may be a store URL (on
+    the download server or a BrAinPI view), or a dataset, in which case
+    the first ``*.zarr`` directory on the download server is opened, else
+    the first OME-Zarr view BrAinPI offers for the dataset's listed
+    files (see brainpi.py). Nothing is read until you slice an array.
+    Requires ``pip install scigantic-bil[zarr]``."""
     try:
         import zarr
     except ImportError as exc:
@@ -762,10 +770,27 @@ def open_zarr(target: str | Dataset | DatasetDetail) -> "zarr.Group | zarr.Array
     url = target if isinstance(target, str) and target.lower().rstrip("/").endswith(".zarr") else None
     if url is None:
         stores = find_zarr(target)
-        if not stores:
-            raise BilError(f"no *.zarr store found under {resolve_url(target)}")
-        url = stores[0]
+        if stores:
+            url = stores[0]
+        else:
+            url = _brainpi_omezarr(target)
+        if url is None:
+            raise BilError(
+                f"no *.zarr store under {resolve_url(target)} and BIL lists no BrAinPI view for it"
+            )
     return zarr.open(url.rstrip("/"), mode="r")
+
+
+def _brainpi_omezarr(target: str | Dataset | DatasetDetail) -> str | None:
+    """The first BrAinPI OME-Zarr view for a dataset, or None when the
+    target is a bare URL (no metadata record to consult) or BIL lists
+    nothing."""
+    from .brainpi import first_omezarr
+    from .files import _bildid_of
+
+    if isinstance(target, str) and _bildid_of(target) is None:
+        return None
+    return first_omezarr(target)
 
 
 def zarr_levels(group: Any, store_url: str | None = None) -> list[str]:
@@ -789,7 +814,13 @@ def zarr_levels(group: Any, store_url: str | None = None) -> list[str]:
         ]
     url = store_url or _store_url_of(group)
     if url:
-        present = {e.name for e in list_files(url) if e.is_dir}
+        try:
+            present = {e.name for e in list_files(url) if e.is_dir}
+        except BilError:
+            # A BrAinPI view is a virtual store with no directory listing
+            # (its URL 404s as a directory); fall through to probing the
+            # declared paths.
+            present = set()
         if declared:
             kept = [p for p in declared if p.split("/")[0] in present]
             if kept:
