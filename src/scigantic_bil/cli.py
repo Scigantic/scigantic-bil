@@ -155,6 +155,35 @@ def _cmd_views(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_edge_prior(args: argparse.Namespace) -> int:
+    from .edge import write_prior
+
+    out = write_prior(args.bildid, args.output)
+    print(f"wrote {out} ({out.stat().st_size} bytes); seed with: scigantic-trend -context-dir <ctx> -seed-from {out}", file=sys.stderr)
+    return 0
+
+
+def _cmd_submission_draft(args: argparse.Namespace) -> int:
+    from .edge import submission_drafts
+
+    drafts = submission_drafts(args.index)
+    if args.cohort is not None:
+        if args.cohort not in drafts:
+            raise ValueError(f"no acquisition directory {args.cohort!r}; have: {sorted(drafts)}")
+        drafts = {args.cohort: drafts[args.cohort]}
+    if args.json:
+        print(json.dumps(drafts, indent=2))
+        return 0
+    for cohort, draft in drafts.items():
+        print(f"# {cohort or '.'}")
+        for sheet in ("instrument", "image"):
+            print(f"[{sheet}]")
+            for k, v in draft[sheet].items():
+                print(f"{k}\t{v}")
+        print("[sources]\n" + "\n".join(draft["sources"]) + "\n")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="scigantic-bil", description="Brain Image Library from the command line")
     p.add_argument("--date", default=None, help="inventory date YYYYMMDD (default: newest)")
@@ -208,6 +237,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     s.add_argument("--limit", type=int, default=32, help="files to ask about for a dataset (0 for all)")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=_cmd_views)
+
+    s = sub.add_parser("edge-prior", help="write a scigantic-edge prior capsule from a BIL dataset's metadata")
+    s.add_argument("bildid")
+    s.add_argument("output", help="file to write, e.g. prior.b64")
+    s.set_defaults(func=_cmd_edge_prior)
+
+    s = sub.add_parser("submission-draft", help="draft BIL Image/Instrument sheet rows from a scigantic-edge index.jsonl")
+    s.add_argument("index", help="index.jsonl or the context directory holding it")
+    s.add_argument("--cohort", default=None, help="one acquisition directory, when the index spans several")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=_cmd_submission_draft)
 
     args = p.parse_args(argv)
     try:

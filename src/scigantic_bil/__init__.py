@@ -26,6 +26,7 @@ from .brainpi import (
 )
 from .cache import cache_dir, clear as clear_cache, disable_cache, enable_cache, is_cache_enabled
 from .catalog import BilCatalog, available_inventory_dates
+from .edge import prior_capsule, prior_records, read_index, submission_draft, submission_drafts, write_prior
 from .files import (
     LISTING_TIMEOUT,
     MANIFEST_MAX_BYTES,
