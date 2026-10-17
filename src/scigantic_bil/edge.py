@@ -15,7 +15,8 @@ the Instrument sheet's fields folded in.
 Box -> deposit: :func:`submission_draft` reads the ``index.jsonl`` an edge
 box wrote while watching the acquisition and fills in BIL's Image and
 Instrument submission sheets from the headers it decoded (SmartSPIM
-metadata.txt, Zeiss CZI, BigDataViewer XML, OME-TIFF, Imaris, KLB). On
+metadata.txt, Zeiss CZI, Luxendo and mesoSPIM sidecars, lattice Settings.txt,
+BigDataViewer XML, Micro-Manager metadata, OME-TIFF, Imaris, KLB, ND2). On
 2026-10-17, 849 of 1,004 light-sheet records on BIL had an Instrument
 block and about half of those had objective, detector and wavelength
 fields; the rest were left blank by hand. These are exactly the values
@@ -239,6 +240,29 @@ def _image_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         sx, sy, sz = _num(f.get("pixelSizeX")), _num(f.get("pixelSizeY")), _num(f.get("pixelSizeZ"))
         channels, slices = _int(f.get("sizeC")), _int(f.get("sizeZ"))
         xsize, ysize, zsize = _int(f.get("sizeX")), _int(f.get("sizeY")), _int(f.get("sizeZ"))
+    elif fmt == "mesospim-meta":
+        sx = sy = _num(f.get("pixelSizeUm"))
+        sz = _num(f.get("zStepUm"))
+        channels, slices = _int(f.get("channels")), _int(f.get("zPlanes"))
+        xsize, ysize = _int(f.get("imageWidth")), _int(f.get("imageLength"))
+    elif fmt == "luxendo-stack":
+        sx, sy, sz = _num(f.get("voxelSizeXUm")), _num(f.get("voxelSizeYUm")), _num(f.get("voxelSizeZUm"))
+        slices = _int(f.get("sizeZ"))
+        xsize, ysize, zsize = _int(f.get("sizeX")), _int(f.get("sizeY")), _int(f.get("sizeZ"))
+        on = f.get("lasersOnNm") or []
+        channels = len(on) if on else None
+    elif fmt == "lls-settings":
+        sz = _num(f.get("stepUm"))
+        channels, slices = _int(f.get("channels")), _int(f.get("planes"))
+        xsize, ysize = _int(f.get("imageWidth")), _int(f.get("imageLength"))
+    elif fmt == "micromanager-metadata":
+        sx = sy = _num(f.get("pixelSizeUm"))
+        sz = _num(f.get("zStepUm"))
+        channels, slices = _int(f.get("channels")), _int(f.get("slices"))
+        xsize, ysize = _int(f.get("imageWidth")), _int(f.get("imageLength"))
+    elif fmt == "nd2":
+        sx = sy = _num(f.get("pixelSizeUm"))
+        xsize, ysize = _int(f.get("imageWidth")), _int(f.get("imageLength"))
     else:
         return row
     row["stepsizex"], row["stepsizey"], row["stepsizez"] = _fmt(sx), _fmt(sy), _fmt(sz)
@@ -285,12 +309,48 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["illuminationwavelength"] = ", ".join(ex) + (" nm" if ex else "")
     elif fmt == "bdv-spimdata":
         row["microscopetype"] = "Light-sheet"
+    elif fmt == "mesospim-meta":
+        row["microscopetype"] = "Light-sheet"
+        row["microscopemanufacturerandmodel"] = "mesoSPIM"
+        row["objectivename"] = _text(f.get("zoom")) or ""
+        row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
+        row["detectortype"] = "CMOS" if f.get("cameraType") else ""
+        row["detectormodel"] = _text(f.get("cameraType")) or ""
+        lines = [str(int(_num(str(w).split()[0]) or 0)) for w in (f.get("lasers") or []) if _num(str(w).split()[0])]
+        row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
+        row["illuminationtypes"] = "laser" if lines else ""
+    elif fmt == "luxendo-stack":
+        row["microscopetype"] = "Light-sheet"
+        model = _text(f.get("scopeType")) or ""
+        row["microscopemanufacturerandmodel"] = ("Luxendo " + model).strip()
+        row["objectivename"] = _text(f.get("objectiveName")) or ""
+        row["objectivena"] = _fmt(_num(f.get("numericalAperture")))
+        row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
+        row["objectiveimmersion"] = _text(f.get("objectiveImmersion")) or ""
+        on = [_fmt(_num(v)) for v in (f.get("lasersOnNm") or []) if _num(v)]
+        row["illuminationwavelength"] = ", ".join(on) + (" nm" if on else "")
+        row["illuminationtypes"] = "laser" if on else ""
+    elif fmt == "lls-settings":
+        row["microscopetype"] = "Light-sheet"
+        row["microscopemanufacturerandmodel"] = "Lattice light-sheet (Janelia design)"
+        row["detectortype"] = "CMOS" if f.get("cameraModel") else ""
+        row["detectormodel"] = _text(f.get("cameraModel")) or ""
+        lines = [_fmt(_num(v)) for v in (f.get("laserLinesNm") or []) if _num(v)]
+        row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
+        row["illuminationtypes"] = "laser" if lines else ""
+    elif fmt == "nd2":
+        row["microscopemanufacturerandmodel"] = "Nikon"
+        row["objectivename"] = _text(f.get("objectiveName")) or ""
+        row["objectivena"] = _fmt(_num(f.get("numericalAperture")))
+        row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
+        row["detectormodel"] = _text(f.get("cameraName")) or ""
     return row
 
 
 # Formats ranked by how much of the submission they can fill; the best
 # available one supplies each column, later ones only fill blanks.
-_PREFERENCE = ("smartspim-metadata", "czi", "bdv-spimdata", "ome-tiff", "imaris", "klb")
+_PREFERENCE = ("smartspim-metadata", "czi", "luxendo-stack", "mesospim-meta", "lls-settings", "bdv-spimdata",
+               "micromanager-metadata", "ome-tiff", "imaris", "klb", "nd2")
 
 
 def _dir_of(source: str) -> str:
@@ -298,7 +358,7 @@ def _dir_of(source: str) -> str:
     return source.rsplit("/", 1)[0] if "/" in source else ""
 
 
-_PLANE_FORMATS = frozenset({"png", "tiff"})
+_PLANE_FORMATS = frozenset({"png", "tiff", "dcimg"})
 
 
 def submission_drafts(records: Iterable[dict[str, Any]] | str | Path) -> dict[str, dict[str, Any]]:

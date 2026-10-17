@@ -205,7 +205,7 @@ $ scigantic-bil views ace-bet-fox
 
 ## On the microscope: scigantic-edge
 
-[scigantic-edge](https://github.com/Scigantic/scigantic-edge) is a static Go daemon that watches the directory a microscope writes into and decodes each new file's header, including what a light-sheet rig writes: SmartSPIM `metadata.txt`, Zeiss CZI, BigDataViewer XML, Imaris, KLB, BigTIFF OME-TIFF. This package connects that box to a BIL deposit in both directions.
+[scigantic-edge](https://github.com/Scigantic/scigantic-edge) is a static Go daemon that watches the directory a microscope writes into and decodes each new file's header, including what a light-sheet rig writes: SmartSPIM `metadata.txt`, Zeiss CZI, Luxendo and mesoSPIM sidecars, lattice `Settings.txt`, BigDataViewer XML, Micro-Manager metadata, Imaris, KLB, BigTIFF OME-TIFF, ND2. This package connects that box to a BIL deposit in both directions.
 
 ```python
 bil.write_prior("ace-cup-eel", "prior.b64")      # the lab's last deposit, as an edge prior

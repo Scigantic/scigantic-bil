@@ -125,6 +125,25 @@ def test_two_acquisitions_are_two_drafts_not_one_blend() -> None:
     assert submission_draft([SMARTSPIM, other], cohort="run")["image"]["stepsizez"] == "2"
 
 
+MESOSPIM = {"source": "cns/Tile0_Ch638.tiff_meta.txt", "sizeBytes": 1, "mtime": 0, "decoded": {"format": "mesospim-meta", "summary": "", "fields": {
+    "pixelSizeUm": 0.85, "zStepUm": 3.0, "zPlanes": 1400, "imageWidth": 5056, "imageLength": 2960, "channels": 1, "zoom": "5x", "magnification": 5.0,
+    "cameraType": "Photometrics", "lasers": ["638 nm"]}}}
+LUXENDO = {"source": "muvi/uni_tp-0_ch-0.json", "sizeBytes": 1, "mtime": 0, "decoded": {"format": "luxendo-stack", "summary": "", "fields": {
+    "scopeType": "MuVi-SPIM", "voxelSizeXUm": 0.195, "voxelSizeYUm": 0.195, "voxelSizeZUm": 1.0, "sizeX": 2048, "sizeY": 2048, "sizeZ": 181,
+    "objectiveName": "Olympus XLUMPLFLN 20XW", "magnification": 20.0, "numericalAperture": 1.0, "objectiveImmersion": "water", "lasersOnNm": [488.0]}}}
+
+
+def test_submission_draft_from_mesospim_and_luxendo_records() -> None:
+    d = submission_draft([MESOSPIM])
+    assert d["instrument"]["microscopemanufacturerandmodel"] == "mesoSPIM"
+    assert d["instrument"]["objectivename"] == "5x" and d["instrument"]["illuminationwavelength"] == "638 nm"
+    assert (d["image"]["stepsizex"], d["image"]["stepsizez"], d["image"]["slices"], d["image"]["xsize"]) == ("0.85", "3", "1400", "5056")
+    d = submission_draft([LUXENDO])
+    assert d["instrument"]["microscopemanufacturerandmodel"] == "Luxendo MuVi-SPIM"
+    assert d["instrument"]["objectivena"] == "1" and d["instrument"]["objectiveimmersion"] == "water"
+    assert d["image"]["stepsizex"] == "0.195" and d["image"]["zsize"] == "181" and d["image"]["channels"] == "1"
+
+
 def test_submission_draft_with_nothing_useful_is_all_blank() -> None:
     draft = submission_draft([PLANE])
     assert all(v == "" for k, v in draft["image"].items() if k != "files")
