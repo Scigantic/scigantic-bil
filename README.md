@@ -203,6 +203,28 @@ bil.thumbnail("ace-can-elk")               # Imaris-only dataset: previews from 
 $ scigantic-bil views ace-bet-fox
 ```
 
+## On the microscope: scigantic-edge
+
+[scigantic-edge](https://github.com/Scigantic/scigantic-edge) is a static Go daemon that watches the directory a microscope writes into and decodes each new file's header, including what a light-sheet rig writes: SmartSPIM `metadata.txt`, Zeiss CZI, BigDataViewer XML, Imaris, KLB, BigTIFF OME-TIFF. This package connects that box to a BIL deposit in both directions.
+
+```python
+bil.write_prior("ace-cup-eel", "prior.b64")      # the lab's last deposit, as an edge prior
+# on the box: scigantic-trend -context-dir ./ctx -seed-from prior.b64
+# -> one alert per directory and key when a session's voxel size, channel count,
+#    objective, magnification or NA disagrees with the deposit
+
+drafts = bil.submission_drafts("./ctx")           # from the box's index.jsonl
+drafts["SmartSPIM_000393"]["instrument"]          # BIL Instrument sheet columns, filled from metadata.txt
+drafts["SmartSPIM_000393"]["image"]               # stepsizex/y/z, channels, ysize ...
+```
+
+```console
+$ scigantic-bil edge-prior ace-cup-eel prior.b64
+$ scigantic-bil submission-draft ./ctx            # one draft per acquisition directory, blank where the box did not say
+```
+
+The prior is the same base64 capsule the edge's own `-export-prior` writes; its card holds one `bil-image` context record per Image row of the BIL record, with the Instrument sheet folded in. The draft uses BIL's own column names, so a row pastes into the submission spreadsheet. Measured on 2026-10-17: of 1,004 light-sheet records on BIL, 849 have an Instrument block and about half of those name an objective, detector or wavelength; 808 are LifeCanvas SmartSPIM, whose `metadata.txt` carries every one of those values.
+
 ## Caching
 
 On by default. Metadata responses, directory listings and manifests are cached to `~/.cache/scigantic-bil` (macOS: `~/Library/Caches/scigantic-bil`; override with `SCIGANTIC_BIL_CACHE` or `enable_cache(cache_dir=...)`) and expire after 7 days, since BIL republishes its inventory every few days. Inventory snapshots are immutable once published and are kept as plain TSV files without expiry. Image bytes are never cached.
