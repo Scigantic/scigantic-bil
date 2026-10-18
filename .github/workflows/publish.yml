@@ -9,6 +9,15 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
+    inputs:
+      skip_live_tests:
+        description: >-
+          Publish without running the live test suite. For when the Brain
+          Image Library's download host is down (three publish runs died at
+          the 45-minute cap on 2026-10-17) and the release itself does not
+          touch the live read path. Typecheck still runs.
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -28,7 +37,13 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,zarr,pandas]"
-          pytest -q --durations=15
+          mypy src/scigantic_bil
+      - name: Live tests
+        if: ${{ !inputs.skip_live_tests }}
+        run: pytest -q --durations=15
+      - name: Offline tests only
+        if: ${{ inputs.skip_live_tests }}
+        run: pytest -q tests/test_edge.py -k "not live"
 
   publish:
     needs: test
