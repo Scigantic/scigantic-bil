@@ -37,7 +37,11 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev,zarr,pandas]"
-          mypy src/scigantic_bil
+      - name: Typecheck
+        # One interpreter, as ci.yml does: numpy's stubs differ across
+        # versions and 3.10 reports ndarray type-arg errors 3.11+ do not.
+        if: ${{ matrix.python-version == '3.13' }}
+        run: mypy src/scigantic_bil
       - name: Live tests
         if: ${{ !inputs.skip_live_tests }}
         run: pytest -q --durations=15
