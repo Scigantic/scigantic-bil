@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.7.0
+
+The scigantic-edge bridge reads OME-Zarr stores and Allen Institute
+`voxel` acquisitions, as decoded by scigantic-edge 2026-10-20 or later.
+
+- `submission_draft()` / `submission_drafts()` accept two new edge record
+  formats. `ome-zarr`: step sizes from the level-0 scale in the axes'
+  declared unit, channels, slices and size from the shape, dimension order
+  from the axes. `voxel-manifest`: the Instrument sheet (instrument,
+  objective, laser lines, emission bands, camera); light-sheet is claimed
+  only when the instrument says so.
+- A voxel acquisition (one store per volume and channel) is one draft per
+  `manifest.json`. AIND's `SPIM.ome.zarr` group and its
+  `tile_..._ch_<n>` stores are one draft, counting tiles and channels from
+  the names.
+- A new `acquisition` block on every draft: store, volume and channel
+  counts, store states, fields the stores disagree on (`mismatch`), and the
+  manifest's status, revision and timestamps.
+- One reference store supplies the whole Image row. Channels stored at
+  different resolutions are no longer blended into a row that describes
+  neither.
+- `read_index()` keeps only the last line for each source. `index.jsonl`
+  is an append log, and an edge box in `-watch` mode re-records a store as
+  its shards land; a 200-volume watch log used to draft 10x the stores
+  from the first, partial record.
+- An OME-Zarr scale with no unit, or a non-length unit, leaves the step
+  sizes blank instead of reporting micrometres.
+- Malformed records (fields that are not objects, scalars where lists
+  belong, NaN, infinity) are read as blank instead of raising.
+
+## 0.6.0
+
+First bridge to scigantic-edge: `prior_capsule()` turns a BIL deposit into
+an acquisition prior for an edge box, and `submission_draft()` drafts BIL's
+Image and Instrument sheet rows from the headers an edge box decoded
+(SmartSPIM, Zeiss CZI, BigDataViewer, OME-TIFF, Imaris, KLB, mesoSPIM,
+Luxendo, lattice light-sheet, Micro-Manager, ND2).
+
 ## 0.5.0
 
 Added, at the suggestion of a BIL maintainer: BIL's BrAinPI service
