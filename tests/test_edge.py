@@ -168,3 +168,149 @@ def test_cli_subcommands(tmp_path: Path, capsys) -> None:  # type: ignore[no-unt
     assert out["run"]["instrument"]["objectivename"] == "LCT 3.6x"
     assert main(["edge-prior", "ace-cup-eel", str(tmp_path / "p.b64")]) == 0
     assert (tmp_path / "p.b64").stat().st_size > 100
+
+
+# OME-Zarr stores and voxel manifests. voxel_run1_index.jsonl is the
+# scigantic-edge decoder's own index.jsonl over a real headless run of the
+# Allen Institute voxel engine's simulated instrument (2 XY tiles x 2
+# single-channel profiles, 10 frames of 128 x 192 uint16, 2026-10-20): one
+# voxel-manifest record and four ome-zarr records, each carrying the
+# manifest's view of that store under fields.manifest. The exaSPIM records
+# are hand-written to the same contract from two public tiles' metadata on
+# s3://aind-open-data (Zarr v2 / NGFF 0.4 and Zarr v3 / NGFF 0.5, tczyx).
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "edge"
+VOXEL_RUN1 = FIXTURES / "voxel_run1_index.jsonl"
+EXASPIM_PUBLIC = FIXTURES / "exaspim_public_index.jsonl"
+
+
+def _records(path: Path) -> list[dict]:  # type: ignore[type-arg]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _voxel_parts() -> tuple[dict, list[dict]]:  # type: ignore[type-arg]
+    recs = _records(VOXEL_RUN1)
+    manifests = [r for r in recs if r["decoded"]["format"] == "voxel-manifest"]
+    stores = [r for r in recs if r["decoded"]["format"] == "ome-zarr"]
+    assert len(manifests) == 1 and len(stores) == 4
+    return manifests[0], stores
+
+
+def test_voxel_acquisition_is_one_submission() -> None:
+    drafts = submission_drafts(VOXEL_RUN1)
+    assert len(drafts) == 1
+    (root,) = drafts
+    assert root.endswith("/run1/store/run1")  # the directory holding manifest.json
+    d = submission_draft(VOXEL_RUN1)
+    img, inst, acq = d["image"], d["instrument"], d["acquisition"]
+    assert (img["stepsizex"], img["stepsizey"], img["stepsizez"]) == ("0.47", "0.47", "1")
+    assert img["channels"] == "2"  # gfp + rfp across volumes, not the sizeC=1 of one store
+    assert (img["slices"], img["zsize"], img["ysize"], img["xsize"]) == ("10", "10", "128", "192")
+    assert img["dimensionorder"] == "CZYX"
+    assert acq["status"] == "completed" and acq["revision"] == 15
+    assert acq["stores"] == 4 and acq["volumes"] == 4 and acq["volumesPlanned"] == 4 and acq["volumesCompleted"] == 4
+    assert acq["channels"] == ["gfp", "rfp"] and acq["manifest"].endswith("/run1/store/run1/manifest.json")
+    assert acq["startedAt"] < acq["endedAt"]
+    # The template instrument is a simulator: no light-sheet claim, model as named,
+    # no objective name/NA or camera model in the record, so those stay blank.
+    assert inst["microscopetype"] == "" and inst["microscopemanufacturerandmodel"] == "sim"
+    assert inst["objectivemagnification"] == "8" and inst["objectivena"] == "" and inst["objectivename"] == ""
+    assert inst["illuminationwavelength"] == "488, 561 nm" and inst["illuminationtypes"] == "laser"
+    assert inst["detectionwavelength"] == "510, 600 nm"
+    assert inst["detectormodel"] == "" and inst["detectortype"] == ""
+    assert d["formats"] == {"voxel-manifest": 1, "ome-zarr": 4}
+    assert d["sources"][0].endswith("/manifest.json")
+    assert {s.rsplit("/", 1)[-1] for s in d["sources"][1:]} == {"gfp.ome.zarr", "rfp.ome.zarr"}
+
+
+def test_voxel_stores_group_under_their_manifest_by_each_rule() -> None:
+    manifest, stores = _voxel_parts()
+    root = manifest["source"].rsplit("/", 1)[0]
+    # Rule 1: the sidecar ../../../../manifest.json resolved against the store lands on the
+    # manifest record, also when the record is keyed on the store's zarr.json.
+    keyed = json.loads(json.dumps(stores))
+    for r in keyed:
+        r["source"] += "/zarr.json"
+    assert set(submission_drafts([manifest] + keyed)) == {root}
+    assert submission_draft([manifest] + keyed)["image"]["channels"] == "2"
+    # Rule 2: no sidecars; the manifest's storePaths (relative to its directory) name the stores.
+    no_sidecar = json.loads(json.dumps(stores))
+    for r in no_sidecar:
+        r["decoded"]["fields"]["sidecars"] = []
+    assert set(submission_drafts([manifest] + no_sidecar)) == {root}
+    stale = json.loads(json.dumps(manifest))
+    stale["decoded"]["fields"]["storePaths"] = []
+    stale["source"] = root + "/elsewhere/manifest.json"
+    # Neither rule 1 nor 2 pairs the stores with a manifest in another directory: rule 3 keeps
+    # them together on their own, under the /volumes/ prefix, and the stray manifest is its own draft.
+    assert set(submission_drafts([stale] + no_sidecar)) == {root, root + "/elsewhere"}
+    # Rule 3 alone: no manifest record at all yet. Channel ids still come from each store's
+    # own manifest view, the counts from the stores.
+    only_stores = submission_drafts(no_sidecar)
+    assert set(only_stores) == {root}
+    d = only_stores[root]
+    assert d["image"]["channels"] == "2" and d["image"]["slices"] == "10"
+    assert d["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"]}
+    assert d["instrument"]["microscopemanufacturerandmodel"] == ""
+    # Without the per-store manifest view either, the <channel>.ome.zarr names and volume
+    # directories carry the same counts.
+    bare = json.loads(json.dumps(no_sidecar))
+    for r in bare:
+        r["decoded"]["fields"].pop("manifest", None)
+    assert submission_draft(bare)["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"]}
+    # A voxel run under a different root is a different draft, not a blend.
+    other = json.loads(json.dumps(no_sidecar[:1]))
+    other[0]["source"] = other[0]["source"].replace("/run1/volumes/", "/run2/volumes/")
+    assert len(submission_drafts(no_sidecar + other)) == 2
+
+
+def test_voxel_manifest_alone_seeds_the_draft_before_stores_arrive() -> None:
+    manifest, _ = _voxel_parts()
+    d = submission_draft([manifest])
+    assert d["image"]["channels"] == "2" and d["image"]["stepsizex"] == "" and d["image"]["slices"] == ""
+    assert d["acquisition"]["status"] == "completed" and d["acquisition"]["stores"] == 0
+    assert "volumes" not in d["acquisition"] and d["acquisition"]["channels"] == ["gfp", "rfp"]
+    assert d["instrument"]["illuminationwavelength"] == "488, 561 nm"
+
+
+def test_voxel_manifest_light_sheet_only_when_named() -> None:
+    manifest = json.loads(json.dumps(_voxel_parts()[0]))
+    manifest["decoded"]["fields"]["instrumentName"] = "exaSPIM-1"
+    inst = submission_draft([manifest])["instrument"]
+    assert inst["microscopetype"] == "Light-sheet" and inst["microscopemanufacturerandmodel"] == "exaSPIM-1"
+    manifest["decoded"]["fields"]["instrumentName"] = "confocal-2"
+    assert submission_draft([manifest])["instrument"]["microscopetype"] == ""
+
+
+def test_public_exaspim_stores_map_without_a_manifest() -> None:
+    drafts = submission_drafts(EXASPIM_PUBLIC)
+    assert set(drafts) == {"exaSPIM_851474_2026-07-10_15-23-22/SPIM.ome.zarr", "exaSPIM_2026-08-04_10-27-41/SPIM"}
+    v2 = drafts["exaSPIM_851474_2026-07-10_15-23-22/SPIM.ome.zarr"]
+    img = v2["image"]
+    assert (img["stepsizex"], img["stepsizey"], img["stepsizez"]) == ("5.984", "5.984", "8")
+    assert (img["channels"], img["slices"], img["ysize"], img["xsize"]) == ("1", "2560", "1330", "1774")
+    assert img["dimensionorder"] == "TCZYX"
+    assert all(v == "" for v in v2["instrument"].values())
+    assert v2["acquisition"] == {"stores": 1} and v2["formats"] == {"ome-zarr": 1}
+    v3 = drafts["exaSPIM_2026-08-04_10-27-41/SPIM"]
+    assert (v3["image"]["stepsizex"], v3["image"]["stepsizez"], v3["image"]["slices"]) == ("15.04", "20", "1024")
+    assert v3["sources"] == ["exaSPIM_2026-08-04_10-27-41/SPIM/tile_000000_ch_488.ome.zarr/zarr.json"]
+
+
+def test_ome_zarr_voxel_size_units_reach_micrometres() -> None:
+    from scigantic_bil.edge import _um
+
+    assert _um(0.47, "micrometer") == 0.47 and _um(0.47, "um") == 0.47
+    assert _um(0.47, "\u00b5m") == 0.47 and _um(0.47, "\u03bcm") == 0.47  # micro sign, Greek mu
+    assert _um(0.47, "microns") == 0.47 and _um(0.47, "micrometres") == 0.47
+    assert _um(470, "nanometer") == pytest.approx(0.47) and _um(470, "nm") == pytest.approx(0.47)
+    assert _um(0.001, "millimeter") == pytest.approx(1.0) and _um(0.001, "mm") == pytest.approx(1.0)
+    assert _um(2, None) == 2.0 and _um(None, "micrometer") is None
+    rec = json.loads(json.dumps(_records(EXASPIM_PUBLIC)[0]))
+    f = rec["decoded"]["fields"]
+    f["voxelSizeUnit"], f["voxelSizeX"], f["voxelSizeY"], f["voxelSizeZ"] = "nanometer", 5984, 5984, 8000
+    img = submission_draft([rec])["image"]
+    assert (img["stepsizex"], img["stepsizez"]) == ("5.984", "8")
+
+
+def test_draft_without_stores_has_an_empty_acquisition_block() -> None:
+    assert submission_draft([SMARTSPIM])["acquisition"] == {}

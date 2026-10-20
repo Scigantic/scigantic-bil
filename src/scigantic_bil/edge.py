@@ -16,8 +16,9 @@ Box -> deposit: :func:`submission_draft` reads the ``index.jsonl`` an edge
 box wrote while watching the acquisition and fills in BIL's Image and
 Instrument submission sheets from the headers it decoded (SmartSPIM
 metadata.txt, Zeiss CZI, Luxendo and mesoSPIM sidecars, lattice Settings.txt,
-BigDataViewer XML, Micro-Manager metadata, OME-TIFF, Imaris, KLB, ND2). On
-2026-10-17, 849 of 1,004 light-sheet records on BIL had an Instrument
+BigDataViewer XML, Micro-Manager metadata, OME-TIFF, Imaris, KLB, ND2,
+OME-Zarr stores and the ``manifest.json`` of an Allen Institute ``voxel``
+acquisition). On 2026-10-17, 849 of 1,004 light-sheet records on BIL had an Instrument
 block and about half of those had objective, detector and wavelength
 fields; the rest were left blank by hand. These are exactly the values
 the microscope wrote beside its planes.
@@ -26,12 +27,20 @@ Field names on the BIL side are the metadata API's own
 (``stepsizex``, ``microscopemanufacturerandmodel`` and so on), so a
 draft row can be pasted into the submission spreadsheet column for
 column.
+
+The prior's ``bil-image`` fields already cover what an OME-Zarr record on
+the box can say about itself: ``stepSizeXUm``/``YUm``/``ZUm`` against the
+store's level-0 scale in micrometres, ``channels`` against ``sizeC``,
+``slices`` and ``sizeZ`` against ``sizeZ``, ``sizeX``/``sizeY`` against the
+array shape, ``dimensionOrder`` against the axes names. Nothing OME-Zarr
+specific is added to the prior.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import posixpath
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -188,13 +197,30 @@ def read_index(path: str | Path) -> Iterator[dict[str, Any]]:
                 yield rec
 
 
+# Micrometres per unit, keyed by the spellings seen in BigDataViewer XML,
+# OME-TIFF (symbols) and OME-NGFF axes (UDUNITS-2 names: "micrometer",
+# "nanometer", "millimeter"). British spellings and plurals are folded in
+# before lookup. An unknown or missing unit is taken as micrometres, the
+# convention every other decoder here already relies on.
+_UM_PER_UNIT = {
+    "pm": 1e-6, "picometer": 1e-6,
+    "nm": 1e-3, "nanometer": 1e-3,
+    "um": 1.0, "\u00b5m": 1.0, "\u03bcm": 1.0, "micrometer": 1.0, "micron": 1.0,
+    "mm": 1e3, "millimeter": 1e3,
+    "cm": 1e4, "centimeter": 1e4,
+    "m": 1e6, "meter": 1e6,
+    "angstrom": 1e-4, "\u00e5": 1e-4, "\u212b": 1e-4,
+}
+
+
 def _um(value: Any, unit: Any = None) -> float | None:
     v = _num(value)
     if v is None:
         return None
-    u = (str(unit) if unit else "").strip().lower()
-    scale = {"nm": 1e-3, "mm": 1e3, "m": 1e6, "cm": 1e4, "pm": 1e-6}.get(u, 1.0)
-    return v * scale
+    u = (str(unit) if unit else "").strip().lower().replace("metre", "meter")
+    if u not in _UM_PER_UNIT and len(u) > 3 and u.endswith("s"):
+        u = u[:-1]  # microns, micrometers; never "ms"
+    return v * _UM_PER_UNIT.get(u, 1.0)
 
 
 def _fmt(v: float | None) -> str:
@@ -263,6 +289,15 @@ def _image_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
     elif fmt == "nd2":
         sx = sy = _num(f.get("pixelSizeUm"))
         xsize, ysize = _int(f.get("imageWidth")), _int(f.get("imageLength"))
+    elif fmt == "ome-zarr":
+        # voxelSize* is the level-0 scale transform in voxelSizeUnit (an
+        # NGFF axis unit name, "micrometer" in every store seen so far).
+        u = f.get("voxelSizeUnit")
+        sx, sy, sz = _um(f.get("voxelSizeX"), u), _um(f.get("voxelSizeY"), u), _um(f.get("voxelSizeZ"), u)
+        channels, slices = _int(f.get("sizeC")), _int(f.get("sizeZ"))
+        xsize, ysize, zsize = _int(f.get("sizeX")), _int(f.get("sizeY")), _int(f.get("sizeZ"))
+        names = [str(a.get("name") or "") for a in (f.get("axes") or []) if isinstance(a, dict)]
+        order = "".join(names).upper() or None
     else:
         return row
     row["stepsizex"], row["stepsizey"], row["stepsizez"] = _fmt(sx), _fmt(sy), _fmt(sz)
@@ -344,13 +379,36 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivena"] = _fmt(_num(f.get("numericalAperture")))
         row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
         row["detectormodel"] = _text(f.get("cameraName")) or ""
+    elif fmt == "voxel-manifest":
+        # voxel is a generic acquisition engine; its template instrument is
+        # a simulator. The manifest says light-sheet only when the
+        # instrument's name does (exaSPIM, diSPIM, ...), so the type is left
+        # blank otherwise rather than guessed from the engine's origin.
+        name = _text(f.get("instrumentName")) or ""
+        row["microscopetype"] = "Light-sheet" if _names_light_sheet(name) else ""
+        row["microscopemanufacturerandmodel"] = name
+        row["objectivename"] = _text(f.get("objectiveName")) or ""
+        row["objectivena"] = _fmt(_num(f.get("objectiveNA")))
+        row["objectivemagnification"] = _fmt(_num(f.get("objectiveMagnification")))
+        row["detectormodel"] = _text(f.get("cameraModel")) or ""
+        lines = [_fmt(_num(v)) for v in (f.get("laserWavelengthsNm") or []) if _num(v)]
+        row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
+        row["illuminationtypes"] = "laser" if lines else ""
+        em_table = f.get("channelEmissionNm")
+        em = [_fmt(_num(v)) for v in (em_table.values() if isinstance(em_table, dict) else []) if _num(v)]
+        row["detectionwavelength"] = ", ".join(em) + (" nm" if em else "")
     return row
+
+
+def _names_light_sheet(name: str) -> bool:
+    flat = name.lower().replace("-", "").replace("_", "").replace(" ", "")
+    return any(tag in flat for tag in ("lightsheet", "spim", "lsfm"))
 
 
 # Formats ranked by how much of the submission they can fill; the best
 # available one supplies each column, later ones only fill blanks.
-_PREFERENCE = ("smartspim-metadata", "czi", "luxendo-stack", "mesospim-meta", "lls-settings", "bdv-spimdata",
-               "micromanager-metadata", "ome-tiff", "imaris", "klb", "nd2")
+_PREFERENCE = ("smartspim-metadata", "czi", "luxendo-stack", "mesospim-meta", "lls-settings", "voxel-manifest",
+               "bdv-spimdata", "micromanager-metadata", "ome-zarr", "ome-tiff", "imaris", "klb", "nd2")
 
 
 def _dir_of(source: str) -> str:
@@ -359,6 +417,74 @@ def _dir_of(source: str) -> str:
 
 
 _PLANE_FORMATS = frozenset({"png", "tiff", "dcimg"})
+_STORE_METADATA = frozenset({"zarr.json", ".zattrs", ".zgroup", ".zarray"})
+
+
+def _store_of(source: str) -> str:
+    """The store directory an ``ome-zarr`` record describes: the deepest
+    path component ending in ``.zarr``, so a record keyed on the store's
+    ``zarr.json`` or ``.zattrs`` and one keyed on the directory agree. A
+    source with no such component is its own store (or, for a bare
+    metadata file, its directory)."""
+    s = source.replace("\\", "/").rstrip("/")
+    parts = s.split("/")
+    for i in range(len(parts), 0, -1):
+        if parts[i - 1].lower().endswith(".zarr"):
+            return "/".join(parts[:i])
+    if parts[-1] in _STORE_METADATA:
+        return "/".join(parts[:-1])
+    return s
+
+
+def _store_name(store: str) -> str:
+    base = store.rsplit("/", 1)[-1]
+    low = base.lower()
+    for suffix in (".ome.zarr", ".zarr"):
+        if low.endswith(suffix):
+            return base[: -len(suffix)]
+    return base
+
+
+def _voxel_volume(store: str) -> tuple[str, str] | None:
+    """``(acquisition root, volume directory)`` for a store laid out as
+    voxel writes it, ``<root>/volumes/NNNNNN/<profile>/<channel>.ome.zarr``;
+    ``None`` for any other path."""
+    parts = store.split("/")
+    for i in range(len(parts) - 2):
+        if parts[i] == "volumes" and parts[i + 1].isdigit():
+            return "/".join(parts[:i]), "/".join(parts[: i + 2])
+    return None
+
+
+def _manifest_candidates(store: str, f: dict[str, Any]) -> list[str]:
+    """Where a store's ``manifest.json`` sidecar would sit in the index:
+    the sidecar resolved against the store directory (the decoder writes
+    sidecars relative to the store) and the sidecar as written."""
+    out: list[str] = []
+    for sc in f.get("sidecars") or []:
+        s = str(sc).replace("\\", "/")
+        if s.rsplit("/", 1)[-1] != "manifest.json":
+            continue
+        if not s.startswith("/"):
+            out.append(posixpath.normpath(posixpath.join(store, s)))
+        out.append(s)
+    return out
+
+
+def _store_home(source: str, f: dict[str, Any], manifests: dict[str, str], store_paths: list[tuple[str, str]]) -> str:
+    """The acquisition directory an ``ome-zarr`` record belongs to; the
+    rule is spelled out on :func:`submission_drafts`."""
+    store = _store_of(source)
+    for cand in _manifest_candidates(store, f):
+        if cand in manifests:
+            return manifests[cand]
+    for path, home in store_paths:
+        if store in (path, posixpath.normpath(posixpath.join(home, path)) if home else path) or path.endswith("/" + store):
+            return home
+    vol = _voxel_volume(store)
+    if vol is not None:
+        return vol[0]
+    return _dir_of(store)
 
 
 def submission_drafts(records: Iterable[dict[str, Any]] | str | Path) -> dict[str, dict[str, Any]]:
@@ -371,16 +497,57 @@ def submission_drafts(records: Iterable[dict[str, Any]] | str | Path) -> dict[st
     plain TIFF) are counted under the deepest such directory that
     contains them. Returns ``{directory: draft}`` with the same draft
     shape as :func:`submission_draft`.
+
+    An ``ome-zarr`` record is keyed on its store (the deepest path
+    component ending in ``.zarr``, whether the record names the directory
+    or its ``zarr.json``) and goes to the first of these that applies:
+
+    1. the directory of a ``voxel-manifest`` record that one of the store's
+       ``sidecars`` points at (``../../../manifest.json`` resolved against
+       the store, or the sidecar as written);
+    2. the directory of a ``voxel-manifest`` record whose ``storePaths``
+       lists the store (relative to the manifest's directory, as the
+       decoder writes them, or equal to the store's path);
+    3. the path prefix before ``/volumes/NNNNNN/``, voxel's layout, when
+       no manifest has been indexed yet;
+    4. the store's parent directory, like any other file. The public
+       AIND layout ``SPIM.ome.zarr/tile_NNNNNN_ch_NNN.zarr`` therefore
+       collapses to one draft per ``SPIM.ome.zarr``.
+
+    A voxel acquisition is one BIL submission made of many single-channel
+    stores (one per volume and channel). Within such a group the Image
+    row's ``channels`` is the number of distinct channels across the
+    volumes (each store's ``fields.manifest.channelId``, or its
+    ``<channel>.ome.zarr`` name when the decoder paired no manifest), not
+    the ``sizeC`` of one store (always 1); volumes are counted the same
+    way (``fields.manifest.volumeIndex``, else the ``volumes/NNNNNN``
+    directory). The draft's ``acquisition`` block carries what BIL's
+    sheets have no column for: store and volume counts, channel names,
+    the manifest's status, revision and timestamps.
     """
     recs = list(read_index(records)) if isinstance(records, (str, Path)) else list(records)
+    manifests: dict[str, str] = {}
+    store_paths: list[tuple[str, str]] = []
+    for r in recs:
+        d = r.get("decoded") or {}
+        if str(d.get("format", "")) != "voxel-manifest":
+            continue
+        src = str(r.get("source", "")).replace("\\", "/")
+        manifests[src] = _dir_of(src)
+        for p in (d.get("fields") or {}).get("storePaths") or []:
+            store_paths.append((str(p).replace("\\", "/").rstrip("/"), manifests[src]))
     groups: dict[str, list[dict[str, Any]]] = {}
     planes: list[dict[str, Any]] = []
     for r in recs:
-        fmt = str((r.get("decoded") or {}).get("format", ""))
+        d = r.get("decoded") or {}
+        fmt = str(d.get("format", ""))
+        src = str(r.get("source", ""))
         if fmt in _PLANE_FORMATS:
             planes.append(r)
+        elif fmt == "ome-zarr":
+            groups.setdefault(_store_home(src, d.get("fields") or {}, manifests, store_paths), []).append(r)
         else:
-            groups.setdefault(_dir_of(str(r.get("source", ""))), []).append(r)
+            groups.setdefault(_dir_of(src), []).append(r)
     if not groups:
         groups[""] = []
     dirs = sorted(groups, key=len, reverse=True)
@@ -402,11 +569,13 @@ def submission_draft(records: Iterable[dict[str, Any]] | str | Path, cohort: str
     instruments into one deposit.
 
     Returns ``{"image": {...}, "instrument": {...}, "sources": [...],
-    "formats": {...}}`` with every BIL column present (blank where
-    nothing on the box says), the records each value came from, and a
-    per-format count of what was read. Plane files (PNG, plain TIFF) are
-    counted, not used: they say width and height, which BIL does not ask
-    for.
+    "formats": {...}, "acquisition": {...}}`` with every BIL column
+    present (blank where nothing on the box says), the records each value
+    came from, a per-format count of what was read, and, for OME-Zarr
+    stores and voxel manifests, the counts and status BIL has no column
+    for (empty otherwise; see :func:`submission_drafts`). Plane files
+    (PNG, plain TIFF) are counted, not used: they say width and height,
+    which BIL does not ask for.
     """
     drafts = submission_drafts(records)
     if cohort is not None:
@@ -449,4 +618,51 @@ def _draft(recs: list[dict[str, Any]]) -> dict[str, Any]:
         # a count of files is a lower bound on slices x channels x tiles,
         # reported as files rather than guessed into slices.
         image["files"] = str(planes)
-    return {"image": image, "instrument": instrument, "sources": sources, "formats": counts}
+    acquisition = _acquisition(by_format.get("ome-zarr", []), by_format.get("voxel-manifest", []), image, sources)
+    return {"image": image, "instrument": instrument, "sources": sources, "formats": counts, "acquisition": acquisition}
+
+
+_MANIFEST_KEYS = (("status", "status"), ("revision", "revision"), ("startedAt", "startedAt"), ("endedAt", "endedAt"),
+                  ("volumesPlanned", "volumeCount"), ("volumesCompleted", "completedVolumes"))
+
+
+def _acquisition(stores: list[dict[str, Any]], manifests: list[dict[str, Any]],
+                 image: dict[str, str], sources: list[str]) -> dict[str, Any]:
+    """The ``acquisition`` block of a draft, and the one Image column it
+    corrects: ``channels`` of a voxel acquisition, counted across its
+    single-channel stores."""
+    out: dict[str, Any] = {}
+    if not stores and not manifests:
+        return out
+    out["stores"] = len(stores)
+    first_store_of: dict[str, str] = {}
+    volumes: set[str] = set()
+    for r in stores:
+        store = _store_of(str(r.get("source", "")))
+        view = ((r.get("decoded") or {}).get("fields") or {}).get("manifest")
+        view = view if isinstance(view, dict) else {}
+        vol = _voxel_volume(store)
+        if not view and vol is None:
+            continue
+        volumes.add(str(view.get("volumeIndex")) if view.get("volumeIndex") is not None else (vol[1] if vol else store))
+        first_store_of.setdefault(_text(view.get("channelId")) or _store_name(store), store)
+    if volumes:
+        out["volumes"] = len(volumes)
+        out["channels"] = sorted(first_store_of)
+    if manifests:
+        m = manifests[0]
+        f = (m.get("decoded") or {}).get("fields") or {}
+        out["manifest"] = str(m.get("source", ""))
+        for k_out, k_in in _MANIFEST_KEYS:
+            if f.get(k_in) is not None:
+                out[k_out] = f[k_in]
+        if "channels" not in out and f.get("channelIds"):
+            out["channels"] = [str(c) for c in f["channelIds"]]
+    if volumes:
+        image["channels"] = str(len(first_store_of))
+        for store in first_store_of.values():
+            if store not in sources:
+                sources.append(store)
+    elif out.get("channels") and not image["channels"]:
+        image["channels"] = str(len(out["channels"]))
+    return out
