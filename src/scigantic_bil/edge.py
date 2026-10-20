@@ -40,7 +40,9 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import posixpath
+import re
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -78,12 +80,17 @@ def _num(value: Any) -> float | None:
         v = float(str(value).strip())
     except ValueError:
         return None
-    return v if v == v else None  # NaN check
+    return v if math.isfinite(v) else None  # NaN and +-inf are not values
 
 
 def _int(value: Any) -> int | None:
     v = _num(value)
     return int(v) if v is not None and v > 0 else None
+
+
+def _list(value: Any) -> list[Any]:
+    """``value`` if the decoder wrote a list there, else an empty list."""
+    return value if isinstance(value, list) else []
 
 
 def _text(value: Any) -> str | None:
@@ -180,10 +187,18 @@ def write_prior(detail: DatasetDetail | str, path: str | Path) -> Path:
 
 def read_index(path: str | Path) -> Iterator[dict[str, Any]]:
     """Yield the records of an edge box's ``index.jsonl`` (or a directory
-    holding one), tolerating a torn last line."""
+    holding one), tolerating a torn last line.
+
+    ``index.jsonl`` is an append log: a box in ``-watch`` mode writes a new
+    line each time a source changes (an OME-Zarr store re-records as its
+    shards land, a voxel ``manifest.json`` is rewritten on every status
+    change). Only the last line for each source is yielded, in the order
+    sources first appeared, which is what the box's own resume reads too.
+    """
     p = Path(path)
     if p.is_dir():
         p = p / "index.jsonl"
+    recs: list[dict[str, Any]] = []
     with p.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
@@ -194,7 +209,41 @@ def read_index(path: str | Path) -> Iterator[dict[str, Any]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(rec, dict) and isinstance(rec.get("decoded"), dict):
-                yield rec
+                recs.append(rec)
+    yield from _latest(recs)
+
+
+def _clean(r: Any) -> dict[str, Any] | None:
+    """A record with a dict ``decoded``, a dict ``fields`` and string
+    ``format`` and ``source``, or ``None`` for one that is not a record.
+    Every reader below can then index into it without checking types."""
+    if not isinstance(r, dict) or not isinstance(r.get("decoded"), dict):
+        return None
+    d = dict(r["decoded"])
+    d["format"] = str(d.get("format") or "")
+    d["fields"] = d["fields"] if isinstance(d.get("fields"), dict) else {}
+    src = r.get("source")
+    return dict(r, decoded=d, source=src if isinstance(src, str) else "")
+
+
+def _latest(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The last record for each ``source``, in first-seen order. Records
+    with no source are kept as they are."""
+    by_source: dict[str, dict[str, Any]] = {}
+    loose: list[tuple[int, dict[str, Any]]] = []
+    order: dict[str, int] = {}
+    for i, raw in enumerate(records):
+        r = _clean(raw)
+        if r is None:
+            continue
+        src = str(r.get("source", "")).replace("\\", "/").rstrip("/")
+        if not src:
+            loose.append((i, r))
+            continue
+        order.setdefault(src, i)
+        by_source[src] = r
+    keyed = [(order[k], v) for k, v in by_source.items()] + loose
+    return [r for _, r in sorted(keyed, key=lambda t: t[0])]
 
 
 # Micrometres per unit, keyed by the spellings seen in BigDataViewer XML,
@@ -221,6 +270,19 @@ def _um(value: Any, unit: Any = None) -> float | None:
     if u not in _UM_PER_UNIT and len(u) > 3 and u.endswith("s"):
         u = u[:-1]  # microns, micrometers; never "ms"
     return v * _UM_PER_UNIT.get(u, 1.0)
+
+
+def _um_declared(value: Any, unit: Any) -> float | None:
+    """Like :func:`_um`, but ``None`` when the unit is missing or not a
+    length. OME-NGFF makes an axis unit optional, and a scale with no unit
+    is in no known unit at all, so it is not reported as micrometres."""
+    v = _num(value)
+    u = (str(unit) if unit else "").strip().lower().replace("metre", "meter")
+    if u not in _UM_PER_UNIT and len(u) > 3 and u.endswith("s"):
+        u = u[:-1]
+    if v is None or u not in _UM_PER_UNIT:
+        return None
+    return v * _UM_PER_UNIT[u]
 
 
 def _fmt(v: float | None) -> str:
@@ -275,7 +337,7 @@ def _image_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         sx, sy, sz = _num(f.get("voxelSizeXUm")), _num(f.get("voxelSizeYUm")), _num(f.get("voxelSizeZUm"))
         slices = _int(f.get("sizeZ"))
         xsize, ysize, zsize = _int(f.get("sizeX")), _int(f.get("sizeY")), _int(f.get("sizeZ"))
-        on = f.get("lasersOnNm") or []
+        on = _list(f.get("lasersOnNm"))
         channels = len(on) if on else None
     elif fmt == "lls-settings":
         sz = _num(f.get("stepUm"))
@@ -292,11 +354,12 @@ def _image_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
     elif fmt == "ome-zarr":
         # voxelSize* is the level-0 scale transform in voxelSizeUnit (an
         # NGFF axis unit name, "micrometer" in every store seen so far).
+        # A missing or non-length unit leaves the step sizes blank.
         u = f.get("voxelSizeUnit")
-        sx, sy, sz = _um(f.get("voxelSizeX"), u), _um(f.get("voxelSizeY"), u), _um(f.get("voxelSizeZ"), u)
+        sx, sy, sz = (_um_declared(f.get(k), u) for k in ("voxelSizeX", "voxelSizeY", "voxelSizeZ"))
         channels, slices = _int(f.get("sizeC")), _int(f.get("sizeZ"))
         xsize, ysize, zsize = _int(f.get("sizeX")), _int(f.get("sizeY")), _int(f.get("sizeZ"))
-        names = [str(a.get("name") or "") for a in (f.get("axes") or []) if isinstance(a, dict)]
+        names = [str(a.get("name") or "") for a in _list(f.get("axes")) if isinstance(a, dict)]
         order = "".join(names).upper() or None
     else:
         return row
@@ -316,7 +379,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivename"] = _text(f.get("objective")) or ""
         row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
         row["objectiveimmersion"] = _text(f.get("immersion")) or ""
-        lines = [str(int(_num(w) or 0)) for w in (f.get("channelWavelengthsNm") or []) if _num(w)]
+        lines = [str(int(_num(w) or 0)) for w in _list(f.get("channelWavelengthsNm")) if _num(w)]
         row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
         row["illuminationtypes"] = "laser" if lines else ""
     elif fmt == "czi":
@@ -328,11 +391,11 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivena"] = _fmt(_num(f.get("objectiveNA")))
         row["objectivemagnification"] = _fmt(_num(f.get("objectiveMagnification")))
         row["objectiveimmersion"] = _text(f.get("objectiveImmersion")) or ""
-        dets = [d for d in (f.get("detectorModels") or []) if d]
+        dets = [d for d in _list(f.get("detectorModels")) if d]
         row["detectormodel"] = ", ".join(str(d) for d in dets)
         row["detectortype"] = "CMOS" if dets else ""
-        ex = [_fmt(_num(v)) for v in (f.get("channelExcitationNm") or []) if _num(v)]
-        em = [_fmt(_num(v)) for v in (f.get("channelEmissionNm") or []) if _num(v)]
+        ex = [_fmt(_num(v)) for v in _list(f.get("channelExcitationNm")) if _num(v)]
+        em = [_fmt(_num(v)) for v in _list(f.get("channelEmissionNm")) if _num(v)]
         row["illuminationwavelength"] = ", ".join(ex) + (" nm" if ex else "")
         row["detectionwavelength"] = ", ".join(em) + (" nm" if em else "")
     elif fmt == "imaris":
@@ -340,7 +403,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["microscopetype"] = "Light-sheet" if "lightsheet" in mode.lower().replace(" ", "") else mode
         row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
         row["objectivena"] = _fmt(_num(f.get("numericalAperture")))
-        ex = [_fmt(_num(v)) for v in (f.get("excitationWavelengthsNm") or []) if _num(v)]
+        ex = [_fmt(_num(v)) for v in _list(f.get("excitationWavelengthsNm")) if _num(v)]
         row["illuminationwavelength"] = ", ".join(ex) + (" nm" if ex else "")
     elif fmt == "bdv-spimdata":
         row["microscopetype"] = "Light-sheet"
@@ -351,7 +414,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
         row["detectortype"] = "CMOS" if f.get("cameraType") else ""
         row["detectormodel"] = _text(f.get("cameraType")) or ""
-        lines = [str(int(_num(str(w).split()[0]) or 0)) for w in (f.get("lasers") or []) if _num(str(w).split()[0])]
+        lines = [str(int(_num(str(w).split()[0]) or 0)) for w in _list(f.get("lasers")) if _num(str(w).split()[0])]
         row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
         row["illuminationtypes"] = "laser" if lines else ""
     elif fmt == "luxendo-stack":
@@ -362,7 +425,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivena"] = _fmt(_num(f.get("numericalAperture")))
         row["objectivemagnification"] = _fmt(_num(f.get("magnification")))
         row["objectiveimmersion"] = _text(f.get("objectiveImmersion")) or ""
-        on = [_fmt(_num(v)) for v in (f.get("lasersOnNm") or []) if _num(v)]
+        on = [_fmt(_num(v)) for v in _list(f.get("lasersOnNm")) if _num(v)]
         row["illuminationwavelength"] = ", ".join(on) + (" nm" if on else "")
         row["illuminationtypes"] = "laser" if on else ""
     elif fmt == "lls-settings":
@@ -370,7 +433,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["microscopemanufacturerandmodel"] = "Lattice light-sheet (Janelia design)"
         row["detectortype"] = "CMOS" if f.get("cameraModel") else ""
         row["detectormodel"] = _text(f.get("cameraModel")) or ""
-        lines = [_fmt(_num(v)) for v in (f.get("laserLinesNm") or []) if _num(v)]
+        lines = [_fmt(_num(v)) for v in _list(f.get("laserLinesNm")) if _num(v)]
         row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
         row["illuminationtypes"] = "laser" if lines else ""
     elif fmt == "nd2":
@@ -391,7 +454,7 @@ def _instrument_row_from(fmt: str, f: dict[str, Any]) -> dict[str, str]:
         row["objectivena"] = _fmt(_num(f.get("objectiveNA")))
         row["objectivemagnification"] = _fmt(_num(f.get("objectiveMagnification")))
         row["detectormodel"] = _text(f.get("cameraModel")) or ""
-        lines = [_fmt(_num(v)) for v in (f.get("laserWavelengthsNm") or []) if _num(v)]
+        lines = [_fmt(_num(v)) for v in _list(f.get("laserWavelengthsNm")) if _num(v)]
         row["illuminationwavelength"] = ", ".join(lines) + (" nm" if lines else "")
         row["illuminationtypes"] = "laser" if lines else ""
         em_table = f.get("channelEmissionNm")
@@ -461,7 +524,7 @@ def _manifest_candidates(store: str, f: dict[str, Any]) -> list[str]:
     the sidecar resolved against the store directory (the decoder writes
     sidecars relative to the store) and the sidecar as written."""
     out: list[str] = []
-    for sc in f.get("sidecars") or []:
+    for sc in _list(f.get("sidecars")):
         s = str(sc).replace("\\", "/")
         if s.rsplit("/", 1)[-1] != "manifest.json":
             continue
@@ -475,6 +538,11 @@ def _store_home(source: str, f: dict[str, Any], manifests: dict[str, str], store
     """The acquisition directory an ``ome-zarr`` record belongs to; the
     rule is spelled out on :func:`submission_drafts`."""
     store = _store_of(source)
+    if f.get("layout") == "group":
+        # A plain container group (AIND's SPIM.ome.zarr holding one store
+        # per tile and channel) is the acquisition its member stores sit
+        # in, so it joins their draft instead of starting one of its own.
+        return store
     for cand in _manifest_candidates(store, f):
         if cand in manifests:
             return manifests[cand]
@@ -525,7 +593,7 @@ def submission_drafts(records: Iterable[dict[str, Any]] | str | Path) -> dict[st
     sheets have no column for: store and volume counts, channel names,
     the manifest's status, revision and timestamps.
     """
-    recs = list(read_index(records)) if isinstance(records, (str, Path)) else list(records)
+    recs = list(read_index(records)) if isinstance(records, (str, Path)) else _latest(records)
     manifests: dict[str, str] = {}
     store_paths: list[tuple[str, str]] = []
     for r in recs:
@@ -534,7 +602,7 @@ def submission_drafts(records: Iterable[dict[str, Any]] | str | Path) -> dict[st
             continue
         src = str(r.get("source", "")).replace("\\", "/")
         manifests[src] = _dir_of(src)
-        for p in (d.get("fields") or {}).get("storePaths") or []:
+        for p in _list((d.get("fields") or {}).get("storePaths")):
             store_paths.append((str(p).replace("\\", "/").rstrip("/"), manifests[src]))
     groups: dict[str, list[dict[str, Any]]] = {}
     planes: list[dict[str, Any]] = []
@@ -598,6 +666,12 @@ def _draft(recs: list[dict[str, Any]]) -> dict[str, Any]:
     image = {c: "" for c in BIL_IMAGE_COLUMNS}
     instrument = {c: "" for c in BIL_INSTRUMENT_COLUMNS}
     sources: list[str] = []
+    stores = [r for r in by_format.get("ome-zarr", []) if _has_image(r)]
+    if stores:
+        # One store supplies the whole Image row. Filling blanks from the
+        # next store would pair one store's voxel size with another's
+        # shape when the channels of an acquisition differ in resolution.
+        by_format["ome-zarr"] = [min(stores, key=_reference_rank)]
     for fmt in _PREFERENCE:
         for r in by_format.get(fmt, []):
             f = (r.get("decoded") or {}).get("fields") or {}
@@ -618,8 +692,46 @@ def _draft(recs: list[dict[str, Any]]) -> dict[str, Any]:
         # a count of files is a lower bound on slices x channels x tiles,
         # reported as files rather than guessed into slices.
         image["files"] = str(planes)
-    acquisition = _acquisition(by_format.get("ome-zarr", []), by_format.get("voxel-manifest", []), image, sources)
+    all_stores = [r for r in recs if str((r.get("decoded") or {}).get("format", "")) == "ome-zarr"]
+    acquisition = _acquisition(all_stores, by_format.get("voxel-manifest", []), image, sources)
     return {"image": image, "instrument": instrument, "sources": sources, "formats": counts, "acquisition": acquisition}
+
+
+_STATE_RANK = {"complete": 0, "partial": 1, "metadata-only": 2}
+_COMPARED = ("voxelSizeX", "voxelSizeY", "voxelSizeZ", "voxelSizeUnit", "sizeX", "sizeY", "sizeZ", "dtype")
+_AIND_TILE_CHANNEL = re.compile(r"^(?P<tile>.+?)_ch_(?P<ch>[A-Za-z0-9]+)$")
+
+
+def _fields(r: dict[str, Any]) -> dict[str, Any]:
+    f = (r.get("decoded") or {}).get("fields")
+    return f if isinstance(f, dict) else {}
+
+
+def _has_image(r: dict[str, Any]) -> bool:
+    f = _fields(r)
+    return f.get("layout") != "group" and any(f.get(k) is not None for k in ("sizeX", "voxelSizeX"))
+
+
+def _reference_rank(r: dict[str, Any]) -> tuple[int, int, float, str]:
+    """The store an acquisition's Image row is drafted from: a store with
+    a level-0 shape before one without, a complete store before a partial
+    one, then the finest voxel."""
+    f = _fields(r)
+    vx = _num(f.get("voxelSizeX"))
+    return (0 if f.get("sizeX") is not None else 1, _STATE_RANK.get(str(f.get("state")), 3),
+            vx if vx is not None else float("inf"), str(r.get("source", "")))
+
+
+def _mismatch(stores: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Fields the stores of one acquisition disagree on, with the distinct
+    values; a store that lacks a field does not count as disagreeing."""
+    out: dict[str, list[Any]] = {}
+    for k in _COMPARED:
+        vals = {json.dumps(_fields(r)[k]) for r in stores if _fields(r).get(k) is not None}
+        if len(vals) > 1:
+            out[k] = sorted((json.loads(v) for v in vals),
+                            key=lambda v: (not isinstance(v, (int, float)), v if isinstance(v, (int, float)) else 0, str(v)))
+    return out
 
 
 _MANIFEST_KEYS = (("status", "status"), ("revision", "revision"), ("startedAt", "startedAt"), ("endedAt", "endedAt"),
@@ -634,7 +746,18 @@ def _acquisition(stores: list[dict[str, Any]], manifests: list[dict[str, Any]],
     out: dict[str, Any] = {}
     if not stores and not manifests:
         return out
-    out["stores"] = len(stores)
+    images = [r for r in stores if _fields(r).get("layout") != "group"]
+    out["stores"] = len(images)
+    states: dict[str, int] = {}
+    for r in images:
+        st = str(_fields(r).get("state") or "unknown")
+        states[st] = states.get(st, 0) + 1
+    if states:
+        out["storeStates"] = dict(sorted(states.items()))
+    diff = _mismatch(images)
+    if diff:
+        out["mismatch"] = diff
+    stores = images
     first_store_of: dict[str, str] = {}
     volumes: set[str] = set()
     for r in stores:
@@ -643,6 +766,12 @@ def _acquisition(stores: list[dict[str, Any]], manifests: list[dict[str, Any]],
         view = view if isinstance(view, dict) else {}
         vol = _voxel_volume(store)
         if not view and vol is None:
+            # AIND's file standard names each store tile_..._ch_<channel>;
+            # count tiles and channels from that, and nothing else.
+            aind = _AIND_TILE_CHANNEL.match(_store_name(store))
+            if aind:
+                volumes.add(aind.group("tile"))
+                first_store_of.setdefault(aind.group("ch"), store)
             continue
         volumes.add(str(view.get("volumeIndex")) if view.get("volumeIndex") is not None else (vol[1] if vol else store))
         first_store_of.setdefault(_text(view.get("channelId")) or _store_name(store), store)
@@ -656,12 +785,12 @@ def _acquisition(stores: list[dict[str, Any]], manifests: list[dict[str, Any]],
         for k_out, k_in in _MANIFEST_KEYS:
             if f.get(k_in) is not None:
                 out[k_out] = f[k_in]
-        if "channels" not in out and f.get("channelIds"):
-            out["channels"] = [str(c) for c in f["channelIds"]]
+        if "channels" not in out and _list(f.get("channelIds")):
+            out["channels"] = [str(c) for c in _list(f.get("channelIds"))]
     if volumes:
         image["channels"] = str(len(first_store_of))
         for store in first_store_of.values():
-            if store not in sources:
+            if not any(_store_of(s) == store for s in sources):
                 sources.append(store)
     elif out.get("channels") and not image["channels"]:
         image["channels"] = str(len(out["channels"]))

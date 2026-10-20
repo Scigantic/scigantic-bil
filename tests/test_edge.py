@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import json
+from typing import Any
 from pathlib import Path
 
 import scigantic_bil as bil
@@ -82,7 +83,8 @@ PLANE = {"source": "run/Ex_488_Em_525/436550/436550_310350/000000.png", "sizeByt
 
 def test_submission_draft_from_smartspim_records(tmp_path: Path) -> None:
     index = tmp_path / "index.jsonl"
-    index.write_text("\n".join(json.dumps(r) for r in [PLANE, PLANE, SMARTSPIM, PLANE]) + '\n{"torn', encoding="utf-8")
+    planes = [dict(PLANE, source=PLANE["source"].replace("000000", f"{i:06d}")) for i in range(3)]
+    index.write_text("\n".join(json.dumps(r) for r in [planes[0], planes[1], SMARTSPIM, planes[2]]) + '\n{"torn', encoding="utf-8")
     draft = submission_draft(tmp_path)
     assert set(draft["image"]) == set(BIL_IMAGE_COLUMNS)
     assert set(draft["instrument"]) == set(BIL_INSTRUMENT_COLUMNS)
@@ -249,14 +251,14 @@ def test_voxel_stores_group_under_their_manifest_by_each_rule() -> None:
     assert set(only_stores) == {root}
     d = only_stores[root]
     assert d["image"]["channels"] == "2" and d["image"]["slices"] == "10"
-    assert d["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"]}
+    assert d["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"], "storeStates": {"complete": 4}}
     assert d["instrument"]["microscopemanufacturerandmodel"] == ""
     # Without the per-store manifest view either, the <channel>.ome.zarr names and volume
     # directories carry the same counts.
     bare = json.loads(json.dumps(no_sidecar))
     for r in bare:
         r["decoded"]["fields"].pop("manifest", None)
-    assert submission_draft(bare)["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"]}
+    assert submission_draft(bare)["acquisition"] == {"stores": 4, "volumes": 4, "channels": ["gfp", "rfp"], "storeStates": {"complete": 4}}
     # A voxel run under a different root is a different draft, not a blend.
     other = json.loads(json.dumps(no_sidecar[:1]))
     other[0]["source"] = other[0]["source"].replace("/run1/volumes/", "/run2/volumes/")
@@ -290,7 +292,8 @@ def test_public_exaspim_stores_map_without_a_manifest() -> None:
     assert (img["channels"], img["slices"], img["ysize"], img["xsize"]) == ("1", "2560", "1330", "1774")
     assert img["dimensionorder"] == "TCZYX"
     assert all(v == "" for v in v2["instrument"].values())
-    assert v2["acquisition"] == {"stores": 1} and v2["formats"] == {"ome-zarr": 1}
+    assert v2["acquisition"] == {"stores": 1, "volumes": 1, "channels": ["488"], "storeStates": {"unknown": 1}}
+    assert v2["formats"] == {"ome-zarr": 1}
     v3 = drafts["exaSPIM_2026-08-04_10-27-41/SPIM"]
     assert (v3["image"]["stepsizex"], v3["image"]["stepsizez"], v3["image"]["slices"]) == ("15.04", "20", "1024")
     assert v3["sources"] == ["exaSPIM_2026-08-04_10-27-41/SPIM/tile_000000_ch_488.ome.zarr/zarr.json"]
@@ -314,3 +317,87 @@ def test_ome_zarr_voxel_size_units_reach_micrometres() -> None:
 
 def test_draft_without_stores_has_an_empty_acquisition_block() -> None:
     assert submission_draft([SMARTSPIM])["acquisition"] == {}
+
+
+# --- found by stress-testing the bridge against the edge binary's own output ---
+
+def _store(source: str, **fields: Any) -> dict[str, Any]:
+    base = {"layout": "multiscales", "voxelSizeUnit": "micrometer", "state": "complete", "axes": [
+        {"name": n} for n in "czyx"]}
+    base.update(fields)
+    return {"source": source, "sizeBytes": 1, "mtime": 0, "decoded": {"format": "ome-zarr", "summary": "", "fields": base}}
+
+
+def test_watch_mode_rerecords_keep_only_the_latest_line(tmp_path: Path) -> None:
+    """index.jsonl is an append log; a store re-recorded as its shards land
+    must count once and draft from its last state, not its first."""
+    early = _store("acq/volumes/000001/p/gfp.ome.zarr", state="partial", sizeZ=4, sizeY=8, sizeX=8, voxelSizeX=1, voxelSizeY=1, voxelSizeZ=2)
+    late = _store("acq/volumes/000001/p/gfp.ome.zarr", state="complete", sizeZ=40, sizeY=8, sizeX=8, voxelSizeX=1, voxelSizeY=1, voxelSizeZ=2)
+    index = tmp_path / "index.jsonl"
+    index.write_text("\n".join(json.dumps(r) for r in [early, early, late]) + "\n", encoding="utf-8")
+    d = submission_draft(index)
+    assert d["acquisition"]["stores"] == 1 and d["acquisition"]["storeStates"] == {"complete": 1}
+    assert d["image"]["slices"] == "40"
+    assert submission_draft([early, late])["image"]["slices"] == "40"
+
+
+def test_container_group_joins_the_draft_of_its_tiles() -> None:
+    """AIND's SPIM.ome.zarr is recorded as a group and entered; it must not
+    split the acquisition into an empty draft of its own."""
+    group = _store("ds/SPIM.ome.zarr", layout="group", state="no-array", axes=[])
+    tile = _store("ds/SPIM.ome.zarr/tile_000000_ch_488.zarr", sizeZ=10, sizeY=20, sizeX=30, voxelSizeX=1, voxelSizeY=1, voxelSizeZ=1)
+    drafts = submission_drafts([group, tile])
+    assert list(drafts) == ["ds/SPIM.ome.zarr"]
+    assert drafts["ds/SPIM.ome.zarr"]["acquisition"]["stores"] == 1
+
+
+def test_channels_at_different_resolutions_are_not_blended() -> None:
+    """The 2026-08-04 public exaSPIM acquisition stores 561 nm at half the
+    488 nm resolution; the Image row must describe one real store and the
+    disagreement must be reported, not averaged into a row that is neither."""
+    fine = _store("a/SPIM/tile_000000_ch_488.ome.zarr", sizeZ=1024, sizeY=2660, sizeX=3548, voxelSizeX=15.04, voxelSizeY=15.04, voxelSizeZ=20)
+    coarse = _store("a/SPIM/tile_000000_ch_561.ome.zarr", sizeZ=512, sizeY=1330, sizeX=1774, voxelSizeX=30.08, voxelSizeY=30.08, voxelSizeZ=40)
+    shapeless = _store("a/SPIM/tile_000001_ch_561.ome.zarr", state="no-array", voxelSizeX=30.08, voxelSizeY=30.08, voxelSizeZ=40)
+    for order in ([coarse, shapeless, fine], [shapeless, fine, coarse]):
+        d = submission_draft(order)
+        img = d["image"]
+        assert (img["stepsizex"], img["stepsizez"], img["xsize"], img["slices"]) == ("15.04", "20", "3548", "1024")
+        assert d["acquisition"]["mismatch"]["voxelSizeX"] == [15.04, 30.08]
+        assert d["acquisition"]["mismatch"]["sizeZ"] == [512, 1024]
+        assert img["channels"] == "2" and d["acquisition"]["channels"] == ["488", "561"]
+        assert d["acquisition"]["volumes"] == 2
+
+
+def test_aind_tile_names_count_tiles_and_channels() -> None:
+    stores = [_store(f"r/SPIM.ome.zarr/tile_x_000{x}_y_0000_z_0000_ch_{ch}.zarr", sizeZ=5, sizeY=5, sizeX=5,
+                     voxelSizeX=0.748, voxelSizeY=0.748, voxelSizeZ=1) for x in range(3) for ch in ("488", "638")]
+    d = submission_draft(stores)
+    assert d["acquisition"]["volumes"] == 3 and d["acquisition"]["channels"] == ["488", "638"]
+    assert d["image"]["channels"] == "2"
+
+
+def test_ome_zarr_scale_without_a_unit_is_not_called_micrometres() -> None:
+    d = submission_draft([_store("x/a.zarr", voxelSizeUnit=None, voxelSizeX=0.5, voxelSizeY=0.5, voxelSizeZ=2, sizeX=4, sizeY=4, sizeZ=4)])
+    assert d["image"]["stepsizex"] == "" and d["image"]["xsize"] == "4"
+    d = submission_draft([_store("x/a.zarr", voxelSizeUnit="pixel", voxelSizeX=0.5, voxelSizeY=0.5, voxelSizeZ=2, sizeX=4, sizeY=4, sizeZ=4)])
+    assert d["image"]["stepsizex"] == ""
+    d = submission_draft([_store("x/a.zarr", voxelSizeUnit="nanometer", voxelSizeX=500, voxelSizeY=500, voxelSizeZ=2000, sizeX=4, sizeY=4, sizeZ=4)])
+    assert (d["image"]["stepsizex"], d["image"]["stepsizez"]) == ("0.5", "2")
+
+
+def test_malformed_records_are_skipped_or_read_as_blank() -> None:
+    """A torn or hand-edited index must never crash a draft: fields that
+    are not objects, lists that are scalars, NaN, infinity and huge ints."""
+    bad: list[Any] = [
+        "not a record", 7, None, {"source": "a/x.zarr"}, {"source": "a/y.zarr", "decoded": []},
+        {"source": "a/z.zarr", "decoded": {"format": "ome-zarr", "fields": [1, 2]}},
+        {"source": 5, "decoded": {"format": None, "fields": None}},
+        {"source": "a/manifest.json", "decoded": {"format": "voxel-manifest", "fields": {
+            "storePaths": True, "channelIds": 3, "laserWavelengthsNm": 488, "volumeCount": float("inf")}}},
+        _store("a/volumes/000001/p/g.ome.zarr", sizeX=float("inf"), sizeY=float("nan"), sizeZ=10**40,
+               voxelSizeX="NaN", voxelSizeY=None, voxelSizeZ=[], axes=5, sidecars=1, manifest=[]),
+    ]
+    drafts = submission_drafts(bad)
+    json.dumps(drafts)
+    img = drafts["a"]["image"]
+    assert img["xsize"] == "" and img["ysize"] == "" and img["stepsizex"] == ""
