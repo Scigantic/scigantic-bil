@@ -22,6 +22,8 @@ classifiers = [
   "Typing :: Typed",
   "Topic :: Scientific/Engineering :: Bio-Informatics",
   "Topic :: Scientific/Engineering :: Image Processing",
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
 ]
 
 dependencies = [
@@ -63,6 +65,7 @@ dev = ["pytest>=7", "mypy>=1.10", "types-requests", "pandas-stubs"]
 Homepage = "https://scigantic.com"
 Repository = "https://github.com/Scigantic/scigantic-bil"
 Issues = "https://github.com/Scigantic/scigantic-bil/issues"
+Documentation = "https://github.com/Scigantic/scigantic-bil#readme"
 
 [project.scripts]
 scigantic-bil = "scigantic_bil.cli:main"
