@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata from this file."
+type: software
+title: scigantic-bil
+abstract: "Search the Brain Image Library and read light-sheet, fMOST, STPT and tracing volumes (TIFF, OME-TIFF, JPEG 2000, OME-Zarr) over HTTP without downloading them. Provides a typed catalog over BIL's daily inventory and metadata API, lazy file listing, single-slice TIFF reads and OME-Zarr access."
+authors:
+  - name: Scigantic
+    website: https://scigantic.com
+repository-code: https://github.com/Scigantic/scigantic-bil
+url: https://pypi.org/project/scigantic-bil/
+license: MIT-0
+keywords:
+  - "brain-image-library"
+  - "biccn"
+  - "light-sheet"
+  - "microscopy"
+  - "neuroscience"
+  - "fmost"
+  - "stpt"
+  - "ome-zarr"
+version: "0.7.1"
+date-released: '2026-11-22'
