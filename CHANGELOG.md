@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.1
 
 - A connect attempt is bounded at 10 s, separately from the read timeout.
   Before, one number covered both, so when a BIL host was down each call
