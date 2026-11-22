@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- A connect attempt is bounded at 10 s, separately from the read timeout.
+  Before, one number covered both, so when a BIL host was down each call
+  waited the full read budget (up to 900 s) five times before raising.
+- Tests: when a BIL host refuses or times out connections, the live tests
+  that need it are skipped with the reason, not failed, and the run stops
+  retrying against it.
+
 ## 0.7.0
 
 The scigantic-edge bridge reads OME-Zarr stores and Allen Institute

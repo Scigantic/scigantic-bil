@@ -100,9 +100,11 @@ def retrieve_many(bildids: list[str]) -> dict[str, DatasetDetail]:
 
 
 def _post_retrieve(bildids: list[str]) -> list[dict[str, Any]]:
-    from ._client import get_session
+    from ._client import _CONNECT_TIMEOUT, get_session
 
-    resp = get_session().post(f"{API_BASE}/retrieve", json={"bildids": bildids}, timeout=300.0)
+    resp = get_session().post(
+        f"{API_BASE}/retrieve", json={"bildids": bildids}, timeout=(_CONNECT_TIMEOUT, 300.0)
+    )
     if resp.status_code in (404, 405):
         # BIL's answer to a batch in which no id exists: {"success": "false",
         # "message": "POST failure, no entries found"}. Not a failure of the

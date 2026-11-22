@@ -27,6 +27,12 @@ DOWNLOAD_BASE = "https://download.brainimagelibrary.org"
 _USER_AGENT = f"scigantic-bil/{__version__} (+https://scigantic.com; mailto:support@scigantic.com)"
 
 _MAX_RETRIES = 4
+# Connect and read are bounded separately. `timeout` on a call is the read
+# budget, which runs to 900 s for a large listing; a TCP connect to a host
+# that is down should never consume it. With one shared number, an outage of
+# download.brainimagelibrary.org on 2026-11-21 cost five attempts of up to
+# 900 s each per call, and CI ran into its 45-minute limit without finishing.
+_CONNECT_TIMEOUT = 10.0
 _RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
 
 _session: requests.Session | None = None
@@ -79,7 +85,8 @@ def send(
     for attempt in range(_MAX_RETRIES + 1):
         try:
             resp = session.request(
-                method, url, params=params, headers=headers, stream=stream, timeout=timeout
+                method, url, params=params, headers=headers, stream=stream,
+                timeout=(_CONNECT_TIMEOUT, timeout),
             )
         except requests.RequestException as exc:
             if _is_read_timeout(exc):
